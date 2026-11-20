@@ -6,9 +6,13 @@ Updated 2026-11-20 after completing v15 Phase 0 (T15-00 through T15-05) + cross-
 
 ```
 python -m pytest tests/ -q
--> 340 passed in 10.32s
+-> 384 passed in 9.95s
 
-git log --oneline -10
+git log --oneline -15
+-> 2078324 T15-10/T15-13: spot_composite tests + tick_store verified
+-> 56fa8c1 T15-11/T15-12: BRTI tracker + venue books with book-age gate
+-> 0bd7eda T15-03/T15-04: Sigma calibration + config consistency
+-> 393bd85 T15-05: Docs refresh - README, AGENTS.md, HANDOFF.md, PHASE0_STATUS.md
 -> 96b8bcd T15-24/T15-25: xsec_arb_scan.py + tests
 -> 2e3d12e T15-23: fees.py fix fudge factor causing 1-unit fee error at exact boundaries
 -> 5d911c1 T15-22: box_arbitrage.py fix fee model, units, equivalence override
@@ -18,7 +22,7 @@ git log --oneline -10
 -> f47919f (origin/main) peer pushed during session
 ```
 
-All 340 tests pass. Tree is clean on branch `v15-task-list`.
+All 384 tests pass. Tree is clean on branch `v15-task-list`.
 
 ## Completed v15 Tasks
 
@@ -50,6 +54,16 @@ All 340 tests pass. Tree is clean on branch `v15-task-list`.
 - `AGENTS.md` updated: v15 paths, 340 tests, ubuntu:opencode:home identity, live defaults table
 - `HANDOFF.md` updated (this file)
 
+### Phase 1 Data Plane (T15-10..13) ✅
+
+| Commit | File | Change |
+|--------|------|--------|
+| `56fa8c1` | `brti_tracker.py` + tests | CF Benchmarks BRTI 60s avg replication: 4 venues (Coinbase, Kraken, Bitstamp, LMAX), outlier filter (MAD), WS reconnection |
+| `56fa8c1` | `venue_books.py` + tests | Venue orderbook tracking: Kalshi REST + Polymarket US REST, composite book, book-age gate (<2s) |
+| `2078324` | `tests/test_spot_composite.py` | 17 tests for Binance + Coinbase composite spot with tick storage |
+| (existing) | `spot_composite.py` | Binance bookTicker/trade + Coinbase ticker/level2/matches WS, median composite, tick_store integration |
+| (existing) | `tick_store.py` | Date-partitioned SQLite WAL, append/replay, 1s resolution |
+
 ### Cross-Sectional Arbitrage Stack (T15-20..25) ✅
 
 | Commit | File | Change |
@@ -75,11 +89,11 @@ All 340 tests pass. Tree is clean on branch `v15-task-list`.
 
 ## Pending v15 Tasks
 
-### Phase 1 Data Plane (T15-10..13) ⏳
-- T15-10: Event-driven spot snapshot (Binance WS + Coinbase WS)
-- T15-11: BRTI tracker (CF Benchmarks BRTI 60s avg replication)
-- T15-12: Venue books + book-age gate (orderbook freshness < 2s)
-- T15-13: Backtest data capture (tick-store for cross-venue replay)
+### Phase 1 Data Plane (T15-10..13) ✅ DONE
+- T15-10: Event-driven spot snapshot (Binance WS + Coinbase WS) — `spot_composite.py` + tests
+- T15-11: BRTI tracker (CF Benchmarks BRTI 60s avg replication) — `brti_tracker.py` + tests
+- T15-12: Venue books + book-age gate (orderbook freshness < 2s) — `venue_books.py` + tests
+- T15-13: Backtest data capture (tick-store for cross-venue replay) — `tick_store.py` (existing)
 
 ### Phase 2 Strategy (T15-20..25) ✅ DONE
 - T15-20: Kalshi public mode (keyless market data)
