@@ -177,6 +177,42 @@ class LocalDB:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_ledger_market ON pnl_ledger(market_ticker, applied_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_ledger_synced ON pnl_ledger(synced)")
 
+            # dry_state: paper trading cash balance (T13-05: single source of truth)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dry_state (
+                    key TEXT PRIMARY KEY,
+                    value REAL NOT NULL,
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+
+            # settlement_queue: pending settlements awaiting processing (T13-05)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS settlement_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    market_ticker TEXT NOT NULL,
+                    contracts INTEGER NOT NULL,
+                    side TEXT NOT NULL,
+                    entry_price_cents INTEGER NOT NULL,
+                    settled_price_cents INTEGER NOT NULL,
+                    won INTEGER NOT NULL,
+                    pnl_dollars REAL NOT NULL,
+                    fee_dollars REAL NOT NULL,
+                    settled_at TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_settlement_queue_ticker ON settlement_queue(market_ticker)")
+
+            # settled_markets: tracks which markets have been settled (T13-05)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS settled_markets (
+                    market_ticker TEXT PRIMARY KEY,
+                    settled_at TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+
             # Create indexes for common queries
             conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)")
@@ -450,6 +486,143 @@ class LocalDB:
             except Exception as e:
                 log.warning("delete_pnl_ledger_entry(%s) error: %s", idempotency_key, e)
                 return False
+
+    # ── dry_state (paper trading cash balance) ──────────────────────────────────
+
+    def get_dry_state_cash(self) -> float:
+        """Get paper trading cash balance from local database."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                row = conn.execute(
+                    "SELECT value FROM dry_state WHERE key = 'cash'", ()
+                ).fetchone()
+                if row:
+                    return float(row["value"])
+                return 0.0
+            except Exception as e:
+                log.warning("get_dry_state_cash error: %s", e)
+                return 0.0
+
+    def set_dry_state_cash(self, cash: float) -> bool:
+        """Set paper trading cash balance in local database."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO dry_state (key, value, updated_at)
+                    VALUES ('cash', ?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = datetime('now')
+                    """,
+                    (cash,),
+                )
+                conn.commit()
+                return True
+            except Exception as e:
+                log.warning("set_dry_state_cash error: %s", e)
+                return False
+
+    # ── settlement_queue (pending settlements) ──────────────────────────────────
+
+    def add_settlement(self, market_ticker: str, contracts: int, side: str,
+                       entry_price_cents: int, settled_price_cents: int,
+                       won: bool, pnl_dollars: float, fee_dollars: float,
+                       settled_at: str) -> bool:
+        """Add a pending settlement to the queue."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO settlement_queue
+                        (market_ticker, contracts, side, entry_price_cents,
+                         settled_price_cents, won, pnl_dollars, fee_dollars, settled_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (market_ticker, contracts, side, entry_price_cents,
+                     settled_price_cents, int(won), pnl_dollars, fee_dollars, settled_at),
+                )
+                conn.commit()
+                return True
+            except Exception as e:
+                log.warning("add_settlement(%s) error: %s", market_ticker, e)
+                return False
+
+    def get_pending_settlements(self) -> list:
+        """Get all pending settlements from the queue."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM settlement_queue ORDER BY settled_at"
+                ).fetchall()
+                return [dict(r) for r in rows]
+            except Exception as e:
+                log.warning("get_pending_settlements error: %s", e)
+                return []
+
+    def clear_settlement_queue(self) -> bool:
+        """Clear the settlement queue after processing."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                conn.execute("DELETE FROM settlement_queue")
+                conn.commit()
+                return True
+            except Exception as e:
+                log.warning("clear_settlement_queue error: %s", e)
+                return False
+
+    # ── settled_markets (tracks settled markets) ────────────────────────────────
+
+    def mark_settled(self, market_ticker: str, settled_at: str) -> bool:
+        """Mark a market as settled."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO settled_markets (market_ticker, settled_at)
+                    VALUES (?, ?)
+                    ON CONFLICT(market_ticker) DO UPDATE SET
+                        settled_at = excluded.settled_at
+                    """,
+                    (market_ticker, settled_at),
+                )
+                conn.commit()
+                return True
+            except Exception as e:
+                log.warning("mark_settled(%s) error: %s", market_ticker, e)
+                return False
+
+    def is_settled(self, market_ticker: str) -> bool:
+        """Check if a market has been settled."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM settled_markets WHERE market_ticker = ?", (market_ticker,)
+                ).fetchone()
+                return row is not None
+            except Exception as e:
+                log.warning("is_settled(%s) error: %s", market_ticker, e)
+                return False
+
+    def get_all_settled(self) -> Dict[str, str]:
+        """Get all settled markets with their settled_at timestamps."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                rows = conn.execute(
+                    "SELECT market_ticker, settled_at FROM settled_markets"
+                ).fetchall()
+                return {row["market_ticker"]: row["settled_at"] for row in rows}
+            except Exception as e:
+                log.warning("get_all_settled error: %s", e)
+                return {}
 
     # ── backtest_runs ───────────────────────────────────────────────────────────
 

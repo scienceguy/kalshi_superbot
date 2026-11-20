@@ -364,25 +364,30 @@ def test_replay_resolves_pending_and_credits(monkeypatch, tmp_path):
     """A queued pending settlement is resolved, credited, and drained."""
     import json
     qfile = tmp_path / "q.json"
-    qfile.write_text(json.dumps([{"order_id": "oid1", "payload": {
+    entry = {"order_id": "oid1", "payload": {
         "action": "settlement", "order_id": "oid1", "status": "pending",
         "fill_price_cents": None, "outcome_won": None, "pnl_dollars": None,
         "ticker": "KXBTC15M-TEST", "side": "yes", "contracts": 10, "entry_price": 60,
-    }}]))
-    monkeypatch.setattr(trader, "SETTLEMENT_QUEUE_FILE", qfile)
+    }}
+    qfile.write_text(json.dumps([entry]))
+    # Mock local DB get_pending_settlements to return test data
+    mock_db = MagicMock()
+    mock_db.get_pending_settlements.return_value = [entry]
+    mock_db.apply_settlement_pnl.return_value = True
+    mock_db.clear_settlement_queue.return_value = True
+    monkeypatch.setattr(trader, "get_local_db", lambda: mock_db)
     monkeypatch.setattr(trader, "get_n8n_client", lambda: MagicMock())
     monkeypatch.setattr(trader.state, "session_pnl", 0.0)
     client = MagicMock()
     client.get_market.return_value = {"expiration_value": 1.0}
-    # Mock local DB to return True (new settlement, not duplicate)
-    monkeypatch.setattr(trader, "get_local_db", lambda: MagicMock(apply_settlement_pnl=MagicMock(return_value=True)))
     # Mock Supabase to succeed
     monkeypatch.setattr(trader, "get_supabase_client", lambda: MagicMock(set_bot_state_batch=MagicMock(return_value=True)))
 
     trader._replay_settlement_queue(client)
 
     assert trader.state.session_pnl > 0
-    assert json.loads(qfile.read_text()) == []  # drained
+    # Queue should be cleared (verify clear_settlement_queue was called)
+    mock_db.clear_settlement_queue.assert_called_once()
 
 
 def test_replay_keeps_unresolvable_pending_queued(monkeypatch, tmp_path):

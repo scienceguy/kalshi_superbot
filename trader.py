@@ -133,21 +133,10 @@ def get_raw_supabase_client():
 
 WINDOW_EPSILON = 0.01
 
+# Settlement queue and settled markets now stored in local SQLite (T13-05)
+# These constants kept for test backward compat (tests patch them)
 SETTLEMENT_QUEUE_FILE = Path(__file__).resolve().parent / "settlement_queue.json"
 SETTLED_SINCE_FILE = Path(__file__).resolve().parent / "settled_since.json"
-
-
-def _load_settled_since() -> dict:
-    try:
-        return json.loads(SETTLED_SINCE_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def _save_settled_since(data: dict):
-    tmp = SETTLED_SINCE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data))
-    os.replace(tmp, SETTLED_SINCE_FILE)
 
 
 class BotState:
@@ -334,7 +323,13 @@ class BotState:
 
 # Global state
 state = BotState()
-state.settled_since = _load_settled_since()
+# Load settled markets from local SQLite (T13-05)
+try:
+    db = get_local_db()
+    state.settled_since = db.get_all_settled()
+except Exception as e:
+    log.warning("Failed to load settled markets from local DB: %s", e)
+    state.settled_since = {}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -377,23 +372,22 @@ def _touch_window(now: datetime, cash: float):
 
 
 def _load_dry_state():
+    """Load paper trading cash balance from local SQLite database (T13-05)."""
     try:
-        ds = Path(__file__).resolve().parent / "dry_state.json"
-        if ds.exists():
-            with open(ds) as f:
-                return float(json.load(f).get("cash", 0.0))
+        db = get_local_db()
+        return db.get_dry_state_cash()
     except Exception as e:
-        log.warning("Failed to load dry state: %s — starting fresh", e)
+        log.warning("Failed to load dry state from local DB: %s — starting fresh", e)
     return None
 
 
 def _save_dry_state(cash: float):
+    """Save paper trading cash balance to local SQLite database (T13-05)."""
     try:
-        ds = Path(__file__).resolve().parent / "dry_state.json"
-        with open(ds, "w") as f:
-            json.dump({"cash": round(cash, 4)}, f)
+        db = get_local_db()
+        db.set_dry_state_cash(cash)
     except Exception as e:
-        log.warning("Failed to save dry state: %s", e)
+        log.warning("Failed to save dry state to local DB: %s", e)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -527,43 +521,38 @@ def _mark_to_market_exposure(positions, markets):
 
 # ═════════════════════════════════════════════════════════════════════
 def _load_settlement_queue() -> list:
-    """Load pending settlements from the local queue file.
-    
-    Uses file locking to prevent race conditions if multiple processes
-    access the queue (e.g., bot restart + cron job).
-    """
+    """Load pending settlements from local SQLite database (T13-05)."""
     try:
-        with open(SETTLEMENT_QUEUE_FILE) as f:
-            import fcntl
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError as e:
-        log.error("Settlement queue file corrupted: %s — starting fresh", e)
-        return []
+        db = get_local_db()
+        return db.get_pending_settlements()
     except Exception as e:
-        log.error("Failed to load settlement queue: %s — starting fresh", e)
+        log.error("Failed to load settlement queue from local DB: %s — starting fresh", e)
         return []
 
 
 def _save_settlement_queue(queue: list):
-    """Persist pending settlements to the local queue file.
+    """Persist pending settlements to local SQLite database (T13-05).
     
-    Uses file locking and atomic write (temp file + rename) to prevent
-    corruption and race conditions.
+    Note: This replaces the entire queue. Individual add/clear operations
+    should use db.add_settlement() and db.clear_settlement_queue() directly.
     """
     try:
-        # Atomic write: write to temp file then rename
-        tmp_file = SETTLEMENT_QUEUE_FILE.with_suffix(SETTLEMENT_QUEUE_FILE.suffix + ".tmp")
-        with open(tmp_file, "w") as f:
-            import fcntl
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            json.dump(queue, f)
-        os.replace(tmp_file, SETTLEMENT_QUEUE_FILE)
+        db = get_local_db()
+        db.clear_settlement_queue()
+        for entry in queue:
+            db.add_settlement(
+                market_ticker=entry.get("ticker", ""),
+                contracts=entry.get("contracts", 0),
+                side=entry.get("side", ""),
+                entry_price_cents=entry.get("entry_price", 0),
+                settled_price_cents=entry.get("fill_price_cents", 0),
+                won=entry.get("outcome_won", False),
+                pnl_dollars=entry.get("pnl_dollars", 0.0),
+                fee_dollars=entry.get("fees_dollars", 0.0),
+                settled_at=entry.get("settled_at", datetime.now(timezone.utc).isoformat()),
+            )
     except Exception as e:
-        log.error("Failed to save settlement queue: %s — QUEUE NOT PERSISTED", e)
-        # Don't silently drop the queue; caller will retry on next cycle
+        log.error("Failed to save settlement queue to local DB: %s — QUEUE NOT PERSISTED", e)
         raise
 
 
@@ -1239,7 +1228,11 @@ def cycle(client: KalshiClient):
         # Track when we first detected this position as settled
         if t not in state.settled_since:
             state.settled_since[t] = now_ts
-            _save_settled_since(state.settled_since)
+            try:
+                db = get_local_db()
+                db.mark_settled(t, now_ts)
+            except Exception as e:
+                log.warning("Failed to mark %s as settled in local DB: %s", t, e)
             log.info("Position %s detected as settled — waiting for settlement data", t)
 
         # Fetch actual settlement price from Kalshi market data.
@@ -1260,7 +1253,14 @@ def cycle(client: KalshiClient):
 
         # If we've waited too long for settlement data, queue for replay
         # and clear local state to avoid blocking new entries indefinitely.
-        waited = now_ts - state.settled_since[t]
+        settled_ts = state.settled_since.get(t)
+        if isinstance(settled_ts, str):
+            # Parse ISO timestamp from SQLite
+            try:
+                settled_ts = datetime.fromisoformat(settled_ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                settled_ts = now_ts
+        waited = now_ts - (settled_ts or now_ts)
         if waited > SETTLED_TIMEOUT_SECONDS:
             log.warning(
                 "Position %s stuck awaiting settlement for %.0fs (>%.0fs timeout) — "
@@ -1289,7 +1289,11 @@ def cycle(client: KalshiClient):
             state.positions.pop(t, None)
             state.position_risk.pop(t, None)
             state.settled_since.pop(t, None)
-            _save_settled_since(state.settled_since)
+            try:
+                db = get_local_db()
+                # Note: we keep the settled record in local DB for audit trail
+            except Exception as e:
+                log.warning("Failed to clear settled state for %s: %s", t, e)
             continue
 
         # If settlement data available, book PnL and clear position.
@@ -1483,7 +1487,11 @@ def cycle(client: KalshiClient):
             state.positions.pop(t, {})
             state.position_risk.pop(t, 0.0)
             state.settled_since.pop(t, None)
-            _save_settled_since(state.settled_since)
+            try:
+                db = get_local_db()
+                # Note: we keep the settled record in local DB for audit trail
+            except Exception as e:
+                log.warning("Failed to clear settled state for %s: %s", t, e)
         else:
             # No settlement data available — queue for retry without booking PnL.
             # Position stays in state.positions so it can be re-processed on retry.
