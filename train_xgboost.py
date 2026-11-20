@@ -1,15 +1,15 @@
 """
 train_xgboost.py — train an XGBoost fair-value model for Kalshi ladder rungs.
 
-Designed to run under the proot-distro debian wrapper:
+Runs natively on the VPS (aarch64 glibc), where xgboost is installed in
+/usr/bin/python3:
 
-    ./ml_python train_xgboost.py --series KXBTCD --events 6 --minutes 60 \
+    python3 train_xgboost.py --series KXBTCD --events 6 --minutes 60 \
         --out xgb_btc_model.json
 
-Produces an XGBoost model file (JSON) that can be loaded for inference under
-the same wrapper. This is an offline training tool — the native Termux Python
-cannot import xgboost (glibc vs Bionic), so training and xgboost inference
-must run through ./ml_python.
+Produces an XGBoost model file (JSON) loadable for inference with the same
+interpreter. This is an offline training tool — ml_model.py trains the live
+fair-value model (xgboost/lightgbm with a sklearn fallback).
 
 The torch model in ml_model.py runs natively and is used for live inference.
 This script exists for comparison / potentially better gradient-boosted models.
@@ -60,7 +60,7 @@ def train_from_history(series: str = "KXBTCD", events: int = 6,
                        minutes: int = 60, out: str = "xgb_model.json") -> None:
     """Train an XGBoost model on settled Kalshi history and save to `out`."""
     if xgb is None:
-        raise SystemExit("xgboost not installed — run under ./ml_python")
+        raise SystemExit("xgboost not installed — python3 -m pip install xgboost")
 
     import crossvenue_history as ch
     from binance_feed import prob_above

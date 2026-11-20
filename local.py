@@ -23,7 +23,7 @@ def _mp(*args):
     if not _mp_available():
         raise RuntimeError("mempalace CLI not found (checked PATH and ~/.local/bin/mempalace)")
     quoted = [shlex.quote(a) for a in args]
-    # /tmp is NOT writable on this Termux/proot setup — use the approved temp dir.
+    # /tmp is not writable on every host (Termux/proot) — use the approved temp dir.
     cmd = "cd " + _MP_TMP + " && " + _MP + " " + " ".join(quoted)
     return subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30)
 

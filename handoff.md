@@ -1,26 +1,23 @@
 # Handoff — Kalshi SuperBot Environment Setup
 
-**Date:** 2026-11-05
-**Status:** Complete
+**Date:** 2026-11-20
+**Status:** Complete — ML packages native on the VPS (proot retired)
 
 ---
 
 ## 1. XGBoost & LightGBM (ML packages)
 
-**Working solution:** proot-distro debian container
+**Working solution:** native install in `/usr/bin/python3` on the VPS
+(aarch64 glibc), per T13-24.
 
-xgboost 3.4.1, lightgbm 4.7.0, scipy 1.18.1, narwhals 2.28.0 — all installed and verified.
-
-**Wrapper script:** `./ml_python` in repo root
+xgboost 3.4.1, lightgbm 4.7.0 — installed natively and verified:
 ```bash
-./ml_python -c "import xgboost; import lightgbm; print('OK')"
-./ml_python my_script.py
-./ml_python -m my_module
+python3 -c "import xgboost; import lightgbm; print('OK')"
 ```
 
-**Why proot:** Native Termux Python targets `android-24-arm64_v8a` (Bionic libc). Pre-built wheels are `manylinux_2_28_aarch64` (glibc). Native xgboost built from source but scipy has no Android wheel and won't build — native xgboost can't import `scipy.sparse`.
-
-**Native build cleanup:** Removed native xgboost/lightgbm copies (glibc .so won't load on Android).
+**Retired:** the proot-debian `ml_python` wrapper (Termux-only workaround —
+Bionic vs glibc wheels). It is now a thin shim that execs the native
+interpreter; call sites use `python3` directly.
 
 ---
 
@@ -78,7 +75,7 @@ xgboost 3.4.1, lightgbm 4.7.0, scipy 1.18.1, narwhals 2.28.0 — all installed a
 | File | Purpose |
 |------|---------|
 | `handoff.md` | This file |
-| `ml_python` | proot wrapper for ML packages |
+| `ml_python` | retired proot shim (execs native python3) |
 | `/data/data/com.termux/files/home/.config/opencode/opencode.json` | OpenCode config |
 | `/data/data/com.termux/files/home/.claude-mem/settings.json` | claude-mem settings |
 | `/data/data/com.termux/files/home/.claude-mem/claude-mem.db` | Memory database |
@@ -88,14 +85,14 @@ xgboost 3.4.1, lightgbm 4.7.0, scipy 1.18.1, narwhals 2.28.0 — all installed a
 
 ```bash
 # ML packages
-./ml_python -c "import xgboost; import lightgbm; print('OK')"
+python3 -c "import xgboost; import lightgbm; print('OK')"
 
 # claude-mem
 curl -s http://127.0.0.1:37718/health
 npx claude-mem doctor
 
 # Kilo gateway
-curl -s http://127.0.0.1:18900/v1/models -H "Authorization: Bearer ofm-DCvYp4cupz_aLGQpB8VkQYKEiGv0--00" | python3 -m json.tool
+curl -s http://127.0.0.1:18900/v1/models -H "Authorization: Bearer $KILO_GATEWAY_TOKEN" | python3 -m json.tool
 
 # OpenCode config
 python3 -c "import json; c=json.load(open('/data/data/com.termux/files/home/.config/opencode/opencode.json')); print(c['model'], list(c['providers'].keys()))"

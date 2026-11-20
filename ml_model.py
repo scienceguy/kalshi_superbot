@@ -1,8 +1,8 @@
 """
 ml_model.py — ML model upgrade (T13-24).
 
-On the VPS (aarch64 glibc) install xgboost/lightgbm natively and delete the
-proot `ml_python` wrapper.
+xgboost 3.4.1 and lightgbm 4.7.0 are installed natively on the VPS
+(aarch64 glibc, /usr/bin/python3); the proot `ml_python` wrapper is retired.
 
 Features:
 - GBM q, KL divergence, composite-vs-venue basis, vol regime, time-to-expiry,
@@ -330,9 +330,10 @@ class MLModel:
         ll = log_loss(y_test, y_pred_proba)
         auc = roc_auc_score(y_test, y_pred_proba)
         
-        # Feature importances
+        # Feature importances — coerce numpy scalars to Python floats so the model
+        # card is JSON-serializable and isinstance(v, float) holds for consumers.
         if hasattr(self.model, "feature_importances_"):
-            importances = dict(zip(self.feature_cols, self.model.feature_importances_))
+            importances = {k: float(v) for k, v in zip(self.feature_cols, self.model.feature_importances_)}
         else:
             importances = {}
         
