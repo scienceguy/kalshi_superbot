@@ -11,6 +11,12 @@ import config
 import gates
 from market_finder import MarketInfo
 
+try:
+    from hypothesis import given, settings, strategies as st
+    _HAS_HYPOTHESIS = True
+except ImportError:  # dev-only extra; rest of the suite must still run without it
+    _HAS_HYPOTHESIS = False
+
 
 @dataclass
 class MockMarket:
@@ -292,6 +298,46 @@ class TestMeasuredFloorSide:
         """The YES-equivalent of a NO@3c fill is 97c: inside the band."""
         res = self._run("no", 3, 0.50)
         assert res.metrics.get("yes_equiv_price_cents") == 97
+
+
+if _HAS_HYPOTHESIS:
+
+    class TestMeasuredFloorMirrorProperty:
+        """T13-02 (guards 304d8f8): YES@p and NO@(100-p) are the same
+        contract seen from opposite sides, so the measured floor must be a
+        mirror image: identical YES-equivalent price, identical floor
+        flag, identical q, for ANY price p."""
+
+        @given(p=st.integers(min_value=1, max_value=99))
+        @settings(max_examples=99)
+        def test_yes_no_mirror_image_floors(self, p):
+            q_model = 0.50
+            out = {}
+            for side, cents in (("yes", p), ("no", 100 - p)):
+                with patch.object(gates, "normal_cdf", return_value=q_model), \
+                     patch.object(gates, "spot_for", return_value=96000.0), \
+                     patch.object(gates, "atr_1m", return_value=100.0), \
+                     patch.object(config, "GATES_ATR_ENABLED", False), \
+                     patch.object(config, "GATES_EV_ENABLED", False):
+                    out[side] = gates.evaluate_entry(
+                        MockMarket(), spot_state={}, orderbook=Mock(),
+                        side=side, entry_price_cents=cents)
+            y, n = out["yes"], out["no"]
+            assert y.metrics["yes_equiv_price_cents"] == p
+            assert n.metrics["yes_equiv_price_cents"] == p
+            assert y.metrics.get("q_measured_floor") == n.metrics.get("q_measured_floor")
+            assert y.metrics["q"] == n.metrics["q"]
+            in_band = (config.GATES_MEASURED_BAND_MIN_CENTS <= p
+                       <= config.GATES_MEASURED_BAND_MAX_CENTS)
+            assert bool(y.metrics.get("q_measured_floor")) == in_band
+            expected = max(q_model, config.GATES_MEASURED_Q) if in_band else q_model
+            assert abs(y.metrics["q"] - expected) < 1e-12
+
+else:
+
+    @pytest.mark.skip(reason="hypothesis not installed")
+    def test_t13_02_mirror_property_needs_hypothesis():
+        pass
 
 
 if __name__ == "__main__":
