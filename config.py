@@ -224,6 +224,16 @@ WS_SPOT_STALE_SECONDS = _env_float("WS_SPOT_STALE_SECONDS", 1.0)  # Max age for 
 WS_SPOT_MAX_EXCHANGE_LATENCY = _env_float("WS_SPOT_MAX_EXCHANGE_LATENCY", 0.5)  # Max exchange-to-receive latency
 # Fallback to REST if WS not available
 SPOT_COMPOSITE_FALLBACK_TO_REST = _env_bool("SPOT_COMPOSITE_FALLBACK_TO_REST", True)
+
+# BRTI Tracker (T15-11)
+# CF Benchmarks BRTI is a 60-second volume-weighted average.
+# We build a proxy from WS ticks (Binance + Coinbase median) with 60s window.
+BRTI_TRACKER_ENABLED = _env_bool("BRTI_TRACKER_ENABLED", True)
+BRTI_WINDOW_SECONDS = _env_float("BRTI_WINDOW_SECONDS", 60.0)
+BRTI_STALE_SECONDS = _env_float("BRTI_STALE_SECONDS", 2.0)  # Max age for entry decisions
+# Fallback to REST composite_price if WS not available
+BRTI_FALLBACK_TO_REST = _env_bool("BRTI_FALLBACK_TO_REST", True)
+
 # Local DB → Supabase background sync interval. Trading bots need fast crash
 # protection: a 5-minute sync window can lose up to 5 minutes of P&L/state on
 # a crash. 30s keeps the local→online gap small without hammering Supabase.
