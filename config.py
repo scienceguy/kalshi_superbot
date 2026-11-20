@@ -138,9 +138,7 @@ else:
 
 # ═════════════════════════════════════════════════════════════════════
 # SIGNAL THRESHOLDS (optimized from backtests - 2026-11-03)
-# Backtest best: MIN_SKEW=3, MIN_TREND=8, window=6-11min, band=15-55c
-# EV=0.58/trade, win_rate=52.8%, maxDD=84.6% (needs risk management)
-# Real backtest best: EV=0.077, win_rate=48.2%, maxDD=68.4%
+# Live defaults: window=4-14min, band=75c (MIN_YES) / 95-99c (ENTRY_BAND)
 # ═════════════════════════════════════════════════════════════════════
 MIN_SKEW_CENTS = _env_int("MIN_SKEW_CENTS", 3)
 MIN_TREND_CENTS = _env_int("MIN_TREND_CENTS", 8)
@@ -258,8 +256,7 @@ ORDER_TIME_IN_FORCE = "immediate_or_cancel"
 #
 # Therefore: do not hardcode a favourable band on the strength of a prior, and
 # do not widen this one to "look better" without re-running scripts/measure_edge.py
-# and reporting per-DISTINCT-MARKET numbers. The 15-55c AGENTS.md "Optimal
-# Parameters" band is significantly NEGATIVE on this larger sample.
+# and reporting per-DISTINCT-MARKET numbers. Live default is 95-99c.
 ENTRY_BAND_MIN = _env_int("ENTRY_BAND_MIN", 95)
 ENTRY_BAND_MAX = _env_int("ENTRY_BAND_MAX", 99)
 MAX_NO_ENTRY_CENTS = _env_int("MAX_NO_ENTRY_CENTS", 99)
@@ -355,7 +352,7 @@ MIN_CASH_ABSOLUTE = _env_float("MIN_CASH_ABSOLUTE", 1.00)
 # the bankroll: 15% per trade, 45% total exposure, 55% never at risk. The old
 # 0.95/0.95/0.02 profile put ~95% of cash in a single trade, so one loss was a
 # ~95% drawdown — which is what the dry-run curve was actually measuring.
-# One contract at the cheap end of the 15-55c entry band is ~12% of a $1.22
+# One contract at the cheap end of the 95-99c entry band is ~12% of a $1.22
 # bankroll, so below that the bot simply cannot trade — the granularity, not
 # the risk appetite, sets the floor here. Kelly sizing on a near-fair binary
 # is 2-5% per position, so 12% is the maximum this bankroll can express.
