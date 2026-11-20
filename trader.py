@@ -74,6 +74,12 @@ import gates  # noqa: E402
 _ladder_strategy = None
 _local_module = None
 
+# Cross-venue arbitrage modules (lazy-loaded)
+_cross_venue_arb = None
+_leg_risk_mgr = None
+_crossvenue_monitor = None
+_box_scanner = None
+
 # Lazy-loaded ML fair-value model (only when --ml-model is passed).
 _ml_model = None
 
@@ -89,6 +95,140 @@ def _load_ml_model(path: str):
     except Exception as e:
         log.warning("Failed to load ML model from %s: %s — continuing without ML", path, e)
     return _ml_model
+
+
+def _get_cross_venue_arb():
+    """Lazy-load cross-venue arbitrage module."""
+    global _cross_venue_arb
+    if _cross_venue_arb is None:
+        try:
+            import cross_sectional_arb
+            _cross_venue_arb = cross_sectional_arb
+            log.info("Cross-venue arbitrage module loaded")
+        except Exception as e:
+            log.warning("Failed to load cross_sectional_arb: %s", e)
+    return _cross_venue_arb
+
+
+def _get_leg_risk_mgr():
+    """Lazy-load leg-risk manager."""
+    global _leg_risk_mgr
+    if _leg_risk_mgr is None:
+        try:
+            import leg_risk
+            _leg_risk_mgr = leg_risk.LegRiskManager(
+                leg_timeout_seconds=config.CROSS_VENUE_LEG_TIMEOUT_SECONDS if hasattr(config, 'CROSS_VENUE_LEG_TIMEOUT_SECONDS') else 5.0,
+                max_leg_risk_dollars=config.CROSS_VENUE_MAX_LEG_RISK_DOLLARS if hasattr(config, 'CROSS_VENUE_MAX_LEG_RISK_DOLLARS') else 10.0,
+                flatten_on_timeout=config.CROSS_VENUE_FLATTEN_ON_TIMEOUT if hasattr(config, 'CROSS_VENUE_FLATTEN_ON_TIMEOUT') else True,
+            )
+            log.info("LegRiskManager initialized")
+        except Exception as e:
+            log.warning("Failed to load leg_risk: %s", e)
+    return _leg_risk_mgr
+
+
+def _get_polymarket_client():
+    """Get Polymarket US client."""
+    try:
+        import sys
+        sys.path.insert(0, '/home/ubuntu/kalshi_superbot/archive')
+        from polymarket_client import PolymarketUSClient
+        return PolymarketUSClient()
+    except Exception as e:
+        log.warning("Failed to load PolymarketUSClient: %s", e)
+        return None
+
+
+async def _execute_cross_venue_arb(client: KalshiClient, opportunities: list) -> int:
+    """
+    Execute cross-venue arbitrage opportunities.
+    
+    Returns number of successfully executed arbitrage trades.
+    """
+    if not opportunities:
+        return 0
+    
+    cross_arb = _get_cross_venue_arb()
+    leg_risk = _get_leg_risk_mgr()
+    poly_client = _get_polymarket_client()
+    
+    if cross_arb is None or leg_risk is None or poly_client is None:
+        log.warning("Cross-venue arb components not available, skipping")
+        return 0
+    
+    executed = 0
+    for opp in opportunities:
+        try:
+            log.info(
+                "Executing cross-venue arb: %s @ %s | Kalshi %s @ %dc, Polymarket %s @ %dc | edge=%.2fc",
+                opp.asset, opp.window_start.strftime('%H:%M:%S'),
+                opp.kalshi_side, getattr(opp.kalshi_quote, f'{opp.kalshi_side}_ask'),
+                opp.poly_side, getattr(opp.poly_quote, f'{opp.poly_side}_ask'),
+                opp.net_edge_cents
+            )
+            
+            # Create arb execution plan
+            arb = leg_risk.create_arb(
+                asset=opp.asset,
+                window_start=opp.window_start,
+                kalshi_side=opp.kalshi_side,
+                kalshi_price=int(getattr(opp.kalshi_quote, f'{opp.kalshi_side}_ask')),
+                kalshi_size=1,  # Start with 1 contract
+                poly_side=opp.poly_side,
+                poly_price=int(getattr(opp.poly_quote, f'{opp.poly_side}_ask')),
+                poly_size=1,
+            )
+            
+            # Execute with leg-risk management
+            import asyncio
+            result = await leg_risk.execute_arb(arb)
+            
+            if result.status == leg_risk.ArbStatus.COMPLETE:
+                executed += 1
+                log.info(f"Cross-venue arb {result.arb_id} COMPLETE")
+            elif result.status == leg_risk.ArbStatus.LEG_RISK:
+                log.warning(f"Cross-venue arb {result.arb_id} LEG RISK - handled")
+            else:
+                log.warning(f"Cross-venue arb {result.arb_id} FAILED: {result.status}")
+                
+        except Exception as e:
+            log.error(f"Failed to execute cross-venue arb: {e}")
+    
+    return executed
+
+
+def _check_cross_venue_arb(client: KalshiClient) -> list:
+    """
+    Check for cross-venue arbitrage opportunities.
+    
+    Returns list of ArbOpportunity objects.
+    """
+    cross_arb = _get_cross_venue_arb()
+    poly_client = _get_polymarket_client()
+    
+    if cross_arb is None or poly_client is None:
+        return []
+    
+    from datetime import datetime, timezone
+    # Current 15-minute window
+    now = datetime.now(timezone.utc)
+    minutes = (now.minute // 15) * 15
+    window_start = now.replace(minute=minutes, second=0, microsecond=0)
+    
+    try:
+        opportunities = cross_arb.find_cross_venue_arbs(client, poly_client, window_start)
+        if opportunities:
+            log.info(f"Found {len(opportunities)} cross-venue arbitrage opportunities")
+            for opp in opportunities:
+                log.info(
+                    "  Arb: %s @ %s | edge=%.2fc conf=%.0f%%",
+                    opp.asset, opp.window_start.strftime('%H:%M:%S'),
+                    opp.net_edge_cents, opp.confidence * 100
+                )
+        return opportunities
+    except Exception as e:
+        log.warning("Cross-venue arb check failed: %s", e)
+        return []
 
 
 lf = Path(config.LOG_FILE).expanduser()
@@ -1748,6 +1888,22 @@ def cycle(client: KalshiClient):
                     }
             llm_filtered.append(sig)
         signals = llm_filtered
+
+    # Cross-venue arbitrage check (T15-31, T15-32)
+    # Only check if enabled and we have cash available
+    if config.CROSS_VENUE_ARB_ENABLED if hasattr(config, 'CROSS_VENUE_ARB_ENABLED') else False:
+        if cash_available:
+            arb_opportunities = _check_cross_venue_arb(client)
+            if arb_opportunities:
+                # Execute arbitrage opportunities asynchronously
+                # Note: we use asyncio.run for simplicity; in production this could be a background task
+                try:
+                    import asyncio
+                    executed = asyncio.run(_execute_cross_venue_arb(client, arb_opportunities))
+                    if executed:
+                        log.info(f"Executed {executed} cross-venue arbitrage trades")
+                except Exception as e:
+                    log.warning("Cross-venue arb execution failed: %s", e)
 
     # Pre-entry gates: ATR hurdle, fee-adjusted EV, time-decay cushion.
     # Shadow mode (default) logs would-block decisions without blocking.

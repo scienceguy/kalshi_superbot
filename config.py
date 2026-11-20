@@ -242,6 +242,14 @@ BOOK_MAX_EXCHANGE_LATENCY = _env_float("BOOK_MAX_EXCHANGE_LATENCY", 1.0)
 # Enable book-age gate (refuse trades on stale/one-sided books)
 BOOK_AGE_GATE_ENABLED = _env_bool("BOOK_AGE_GATE_ENABLED", True)
 
+# Cross-Venue Arbitrage (T15-30, T15-31, T15-32)
+# Kalshi vs Polymarket US for SAME asset/window (both settle on CF Benchmarks BRTI 60s avg)
+CROSS_VENUE_ARB_ENABLED = _env_bool("CROSS_VENUE_ARB_ENABLED", False)
+CROSS_VENUE_MIN_EDGE_CENTS = _env_float("CROSS_VENUE_MIN_EDGE_CENTS", 0.5)
+CROSS_VENUE_LEG_TIMEOUT_SECONDS = _env_float("CROSS_VENUE_LEG_TIMEOUT_SECONDS", 5.0)
+CROSS_VENUE_MAX_LEG_RISK_DOLLARS = _env_float("CROSS_VENUE_MAX_LEG_RISK_DOLLARS", 10.0)
+CROSS_VENUE_FLATTEN_ON_TIMEOUT = _env_bool("CROSS_VENUE_FLATTEN_ON_TIMEOUT", True)
+
 # Local DB → Supabase background sync interval. Trading bots need fast crash
 # protection: a 5-minute sync window can lose up to 5 minutes of P&L/state on
 # a crash. 30s keeps the local→online gap small without hammering Supabase.
