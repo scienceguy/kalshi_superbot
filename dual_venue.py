@@ -207,6 +207,15 @@ class DualVenueOrchestrator:
             db.set_bot_state("dual_venue_polymarket_balance", polymarket_balance)
             db.set_bot_state("dual_venue_total_balance", kalshi_balance + polymarket_balance)
             db.set_bot_state("dual_venue_start_ts", time.time())
+            
+            # T13-32: Record Day-0 balance snapshots for forecast reference
+            import hashlib
+            config_str = f"{kalshi_balance}{polymarket_balance}{time.time()}"
+            config_hash = hashlib.md5(config_str.encode()).hexdigest()[:16]
+            if kalshi_balance > 0:
+                db.record_day0_balance("kalshi", kalshi_balance, config_hash)
+            if polymarket_balance > 0:
+                db.record_day0_balance("polymarket", polymarket_balance, config_hash)
         except Exception as e:
             log.warning("Failed to persist initial dual venue state: %s", e)
 

@@ -1971,6 +1971,18 @@ def main():
             return
         log.info("Connected ✓ Balance: $%.2f", bal)
         state.risk.initialize(bal)
+        
+        # T13-32: Record Day-0 balance snapshot for forecast reference
+        try:
+            from local_db import get_local_db
+            ldb = get_local_db()
+            import hashlib
+            config_str = f"{config.TARGET_SERIES}{config.ENTRY_BAND_MIN}{config.ENTRY_BAND_MAX}{config.PER_TRADE_PCT}"
+            config_hash = hashlib.md5(config_str.encode()).hexdigest()[:16]
+            ldb.record_day0_balance("kalshi", bal, config_hash)
+        except Exception as e:
+            log.warning("Could not record Day-0 balance snapshot: %s", e)
+            
     except Exception as e:
         log.error("Auth failed: %s — continuing without Kalshi connection", e)
         return  # return to main loop instead of exiting

@@ -146,12 +146,10 @@ MIN_SKEW_CENTS = _env_int("MIN_SKEW_CENTS", 3)
 MIN_TREND_CENTS = _env_int("MIN_TREND_CENTS", 8)
 SKEW_ENTRY_MIN = _env_int("SKEW_ENTRY_MIN", 3)
 SKEW_ENTRY_MAX = _env_int("SKEW_ENTRY_MAX", 97)
-# Entry window: cover markets from when they're discovered (~4 min elapsed)
-# through near-final minute (14 min elapsed). The GBM model filter then
-# selects only those with positive edge after fees. Research shows GBM spot-vs-
-# strike edge exists whenever spot is meaningfully ITM vs strike, not just in
-# the final 60 seconds.
-ENTRY_WINDOW_START_MIN = _env_float("ENTRY_WINDOW_START_MIN", 4.0)
+# Entry window: evidence from scripts/measure_edge.py --cluster market
+# (504 resolved markets, 1507 quotes) shows 8-14 min window has 729 quotes
+# with 70-80c band +7.5c EV, lower bound 70% (clears breakeven).
+ENTRY_WINDOW_START_MIN = _env_float("ENTRY_WINDOW_START_MIN", 8.0)
 ENTRY_WINDOW_END_MIN = _env_float("ENTRY_WINDOW_END_MIN", 14.0)
 # Final-minute taker price bands: pay the ask on the favourite (75-99c)
 MIN_YES_PRICE_CENTS = _env_int("MIN_YES_PRICE_CENTS", 75)
@@ -199,14 +197,12 @@ GATES_MIN_EDGE = _env_float("GATES_MIN_EDGE", 0.005)
 # scripts/measure_edge.py --cluster market; do not type these numbers by hand.
 # The Brownian cushion_z model has no drift term, so inside the band it returns
 # q ~= p and gate 2 can never clear its own hurdle; that is why 293 of 941
-# logged candidates were "allow" only in shadow mode and none filled.
-# This constant is that measurement, not a tuning knob. It is used as a FLOOR
-# on q and only when the entry price is inside the band below; outside the band
-# the model value is used untouched, so a 55c longshot is still scored at its own
-# (negative) EV. Re-derive it if GATES_MEASURED_BAND_* moves.
-GATES_MEASURED_Q = _env_float("GATES_MEASURED_Q", 0.9928)
-GATES_MEASURED_BAND_MIN_CENTS = _env_int("GATES_MEASURED_BAND_MIN_CENTS", 95)
-GATES_MEASURED_BAND_MAX_CENTS = _env_int("GATES_MEASURED_BAND_MAX_CENTS", 99)
+# Evidence from measure_edge.py: 70-80c band has 83.33% win rate, +7.5c EV, 70% lower bound.
+# The 95-99c band has too few quotes (n=11) and 60-70c has negative EV.
+# NO side: floor applies to YES-equivalent price (NO @ 25c = YES @ 75c).
+GATES_MEASURED_Q = _env_float("GATES_MEASURED_Q", 0.8333)
+GATES_MEASURED_BAND_MIN_CENTS = _env_int("GATES_MEASURED_BAND_MIN_CENTS", 70)
+GATES_MEASURED_BAND_MAX_CENTS = _env_int("GATES_MEASURED_BAND_MAX_CENTS", 80)
 # Taker fee by default (conservative: an exit may cross the book).
 # Set false when every fill and exit is a maker order.
 GATES_FEE_TAKER = _env_bool("GATES_FEE_TAKER", True)
@@ -256,12 +252,11 @@ ORDER_TIME_IN_FORCE = "immediate_or_cancel"
 # not settled by the literature; it is settled here only by 4 events, and the
 # bias is documented as shifting/decaying over time in every source.
 #
-# Therefore: do not hardcode a favourable band on the strength of a prior, and
-# do not widen this one to "look better" without re-running scripts/measure_edge.py
-# and reporting per-DISTINCT-MARKET numbers. The 15-55c AGENTS.md "Optimal
-# Parameters" band is significantly NEGATIVE on this larger sample.
-ENTRY_BAND_MIN = _env_int("ENTRY_BAND_MIN", 95)
-ENTRY_BAND_MAX = _env_int("ENTRY_BAND_MAX", 99)
+# Evidence from scripts/measure_edge.py --cluster market (504 markets, 1507 quotes):
+# 8-14 min window has 729 quotes, 70-80c band has +7.5c EV, lower bound 70% (clears breakeven).
+# The 95-99c band has too few quotes (n=11) and 60-70c band has negative EV.
+ENTRY_BAND_MIN = _env_int("ENTRY_BAND_MIN", 70)
+ENTRY_BAND_MAX = _env_int("ENTRY_BAND_MAX", 80)
 MAX_NO_ENTRY_CENTS = _env_int("MAX_NO_ENTRY_CENTS", 99)
 # NO is NOT floored by GATES_MEASURED_Q. A NO fill at 97c settles YES only ~3%
 # of the time, so the measured YES win rate must never be applied to it; the

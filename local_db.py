@@ -231,6 +231,22 @@ class LocalDB:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_settlement_basis_ticker ON settlement_reference_basis(market_ticker, settled_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_settlement_basis_venue ON settlement_reference_basis(venue, settled_at)")
 
+            # day0_balance_snapshot: T13-32 Day-0 real balance snapshot
+            # Records the starting balance from each venue API at bot startup.
+            # Used as the reference point for all forecasts and growth tracking.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS day0_balance_snapshot (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    venue TEXT NOT NULL,           -- 'kalshi' or 'polymarket'
+                    balance_dollars REAL NOT NULL, -- balance from venue API at startup
+                    ts TEXT NOT NULL,              -- when the snapshot was taken
+                    source TEXT NOT NULL DEFAULT 'api',  -- 'api' or 'manual'
+                    config_hash TEXT,              -- hash of config at snapshot time
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_day0_balance_venue ON day0_balance_snapshot(venue, created_at)")
+
             # Create indexes for common queries
             conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)")
@@ -708,6 +724,75 @@ class LocalDB:
                 log.warning("get_average_basis_bps error: %s", e)
                 return None
 
+    # ── day0_balance_snapshot (T13-32) ─────────────────────────────────────────────
+
+    def record_day0_balance(self, venue: str, balance_dollars: float, 
+                            config_hash: Optional[str] = None) -> bool:
+        """Record Day-0 starting balance from venue API at bot startup.
+        
+        Args:
+            venue: 'kalshi' or 'polymarket'
+            balance_dollars: Balance from venue API (in dollars)
+            config_hash: Hash of config at snapshot time for audit trail
+        """
+        conn = self._get_conn()
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO day0_balance_snapshot
+                        (venue, balance_dollars, ts, source, config_hash)
+                    VALUES (?, ?, ?, 'api', ?)
+                    """,
+                    (venue, balance_dollars, ts, config_hash),
+                )
+                conn.commit()
+                log.info("Recorded Day-0 balance for %s: $%.2f", venue, balance_dollars)
+                return True
+            except Exception as e:
+                log.warning("record_day0_balance(%s) error: %s", venue, e)
+                return False
+
+    def get_day0_balance(self, venue: str) -> Optional[float]:
+        """Get the most recent Day-0 balance snapshot for a venue."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT balance_dollars FROM day0_balance_snapshot 
+                    WHERE venue = ? 
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (venue,),
+                ).fetchone()
+                return float(row["balance_dollars"]) if row else None
+            except Exception as e:
+                log.warning("get_day0_balance(%s) error: %s", venue, e)
+                return None
+
+    def get_all_day0_balances(self) -> Dict[str, float]:
+        """Get all Day-0 balance snapshots as a dict {venue: balance}."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT venue, balance_dollars FROM day0_balance_snapshot 
+                    ORDER BY created_at DESC
+                    """
+                ).fetchall()
+                # Return most recent per venue
+                result = {}
+                for row in rows:
+                    if row["venue"] not in result:
+                        result[row["venue"]] = float(row["balance_dollars"])
+                return result
+            except Exception as e:
+                log.warning("get_all_day0_balances error: %s", e)
+                return {}
+
     # ── backtest_runs ───────────────────────────────────────────────────────────
 
     def insert_backtest_run(self, params: Dict[str, Any], metrics: Dict[str, Any]) -> bool:
@@ -905,6 +990,16 @@ class LocalDBAPI:
     
     def get_bot_state(self, key: str) -> Optional[Any]:
         return self.db.get_bot_state(key)
+    
+    def record_day0_balance(self, venue: str, balance_dollars: float, 
+                            config_hash: Optional[str] = None) -> bool:
+        return self.db.record_day0_balance(venue, balance_dollars, config_hash)
+    
+    def get_day0_balance(self, venue: str) -> Optional[float]:
+        return self.db.get_day0_balance(venue)
+    
+    def get_all_day0_balances(self) -> Dict[str, float]:
+        return self.db.get_all_day0_balances()
     
     def insert_backtest_run(self, params: Dict[str, Any], metrics: Dict[str, Any]) -> bool:
         return self.db.insert_backtest_run(params, metrics)

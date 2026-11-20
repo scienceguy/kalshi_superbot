@@ -94,9 +94,10 @@ class TestGatesEvaluateEntry:
                                 with patch('gates.atr_1m', return_value=100.0):
                                     with patch('gates.spot_for', return_value=95000.0):
                                         market = MockMarket(strike=95000.0, minutes_left=5.0)
-                                        # Entry at 77c, model q ≈ 0.5 (at-the-money), fee ≈ 0.013
-                                        # net_ev = 0.5*(1-0.77) - 0.5*0.77 - 0.013 = 0.115 - 0.385 - 0.013 = -0.283 < 0.005
-                                        result = gates.evaluate_entry(market, side="yes", entry_price_cents=77)
+                                        # Entry at 60c (outside 70-80c band), model q ≈ 0.5, fee ≈ 0.012
+                                        # net_ev = 0.5*(1-0.60) - 0.5*0.60 - 0.012 = 0.20 - 0.30 - 0.012 = -0.112 < 0.005
+                                        # No floor applies since 60c is outside 70-80c band
+                                        result = gates.evaluate_entry(market, side="yes", entry_price_cents=60)
                                         assert result.allowed is False
                                         assert any("gate2" in r for r in result.reasons)
 
@@ -282,22 +283,22 @@ class TestMeasuredFloorSide:
                 side=side, entry_price_cents=cents)
 
     def test_yes_in_band_records_floor_flag(self):
-        """YES at 97c is the price the 0.9928 was actually measured at."""
-        config.GATES_MEASURED_Q = 0.9928
-        res = self._run("yes", 97, 0.50)
-        assert res.metrics.get("yes_equiv_price_cents") == 97
+        """YES at 75c is the price the 0.8333 was actually measured at."""
+        config.GATES_MEASURED_Q = 0.8333
+        res = self._run("yes", 75, 0.50)
+        assert res.metrics.get("yes_equiv_price_cents") == 75
         assert res.metrics.get("q_measured_floor") is True
-        assert res.metrics.get("q") >= 0.9928
+        assert res.metrics.get("q") >= 0.8333
 
     def test_no_at_97c_is_not_floored(self):
-        """NO @ 97c == YES @ 3c: outside the band, must not get 99.28%."""
+        """NO @ 97c == YES @ 3c: outside the band, must not get floor."""
         res = self._run("no", 97, 0.50)
         assert res.metrics.get("yes_equiv_price_cents") == 3
 
-    def test_no_at_3c_maps_to_yes_97(self):
-        """The YES-equivalent of a NO@3c fill is 97c: inside the band."""
-        res = self._run("no", 3, 0.50)
-        assert res.metrics.get("yes_equiv_price_cents") == 97
+    def test_no_at_25c_maps_to_yes_75(self):
+        """The YES-equivalent of a NO@25c fill is 75c: inside the band."""
+        res = self._run("no", 25, 0.50)
+        assert res.metrics.get("yes_equiv_price_cents") == 75
 
 
 if _HAS_HYPOTHESIS:
