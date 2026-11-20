@@ -370,5 +370,57 @@ class TestT13_11SettlementBasis:
         assert recorded == []  # both payout fallbacks skipped
 
 
+class TestKLDivergence:
+    """T13-21: KL divergence layer unit tests."""
+
+    def test_bernoulli_kl_basic(self):
+        from kl_divergence import bernoulli_kl
+        assert bernoulli_kl(0.5, 0.5) == 0.0
+        assert bernoulli_kl(0.0, 0.0) == 0.0
+        assert bernoulli_kl(1.0, 1.0) == 0.0
+        # Known values: KL(0.6||0.5) ≈ 0.0201
+        assert abs(bernoulli_kl(0.6, 0.5) - 0.0201) < 0.001
+        assert abs(bernoulli_kl(0.9, 0.1) - 1.7577) < 0.001
+        assert bernoulli_kl(0.5, 0.0) == float("inf")
+
+    def test_kl_edge_score(self):
+        from kl_divergence import kl_edge_score
+        assert kl_edge_score(0.6, 0.5) > 0
+        assert kl_edge_score(0.5, 0.5) == 0.0
+        assert kl_edge_score(None, 0.5) == 0.0
+
+    def test_ensemble_kl(self):
+        from kl_divergence import ensemble_kl, ensemble_disagreement_gate, bernoulli_kl
+        assert ensemble_kl([0.5, 0.5, 0.5]) == 0.0
+        assert ensemble_kl([0.3, 0.7]) == bernoulli_kl(0.3, 0.7)
+        allow, kl = ensemble_disagreement_gate([0.3, 0.7], threshold=0.1)
+        assert kl > 0.1
+        assert allow is False
+        allow2, _ = ensemble_disagreement_gate([0.5, 0.5], threshold=0.1)
+        assert allow2 is True
+
+    def test_ladder_kl_monotonicity(self):
+        from kl_divergence import ladder_kl
+        # monotonic: P(S>K1) >= P(S>K2) for K1 < K2
+        model = {90000: 0.8, 95000: 0.5, 100000: 0.2}
+        market = {90000: 0.75, 95000: 0.55, 100000: 0.3}
+        assert ladder_kl(model, market) >= 0
+        # violate monotonicity -> inf
+        bad_model = {90000: 0.2, 95000: 0.5, 100000: 0.8}
+        assert ladder_kl(bad_model, market) == float("inf")
+
+    def test_compute_kl_gates(self):
+        from kl_divergence import compute_kl_gates
+        gates = compute_kl_gates(
+            q_model=0.6,
+            entry_price_cents=55,
+            side="yes",
+            ensemble_probs=[0.55, 0.65, 0.60],
+        )
+        assert gates["kl_edge"] > 0
+        assert gates["ensemble_kl"] > 0
+        assert "ensemble_allow" in gates
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
