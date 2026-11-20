@@ -143,14 +143,16 @@ class FillModel:
         # Base probability
         p = self.base_fill_prob
         
-        # Toxicity: 5-45c and 55-95c with 7+ min left
+        # Toxicity: 5-45c and 55-95c with 7+ min left (adverse selection risk)
         in_toxic = (5 <= price_cents <= 45) or (55 <= price_cents <= 95)
         if in_toxic and minutes_left >= 7:
             p *= (1 - self.toxicity_penalty)
         
-        # Spread: tighter spread = harder to get filled as maker
+        # Spread: tighter spread = harder to get filled as maker (less edge)
+        # Reasonable scaling: at 100 bps (1%) spread, factor ~0.8; at 1000 bps (10%), factor ~0.3
         if spread_bps > 0:
-            p *= min(1.0, 10 / spread_bps)  # Rough scaling
+            spread_factor = max(0.2, min(1.0, 200 / spread_bps))
+            p *= spread_factor
         
         # Book imbalance: favorable imbalance helps our side
         if book_imbalance > 0:  # More bids than asks
@@ -467,17 +469,17 @@ class BacktestEngine:
     ) -> Optional[TradeResult]:
         """Simulate early maker strategy (post at bid/ask, wait for fill)."""
         
-        # Check entry band
-        mid = (entry_snap.yes_bid + entry_snap.yes_ask) / 2
-        if not (self.params.ENTRY_BAND_MIN <= mid <= self.params.ENTRY_BAND_MAX):
-            return None
-        
         # Determine side (favorite = higher probability side)
         # YES favorite if mid > 50, NO favorite if mid < 50
-        # But we use the configured band to determine
+        mid = (entry_snap.yes_bid + entry_snap.yes_ask) / 2
         side = "YES" if mid >= 50 else "NO"
         entry_price = int(entry_snap.yes_bid) if side == "YES" else int(entry_snap.no_bid)
         
+        # Check entry band on the actual entry price for the chosen side
+        if not (self.params.ENTRY_BAND_MIN <= entry_price <= self.params.ENTRY_BAND_MAX):
+            return None
+        
+        # Additional NO price limit
         if side == "NO" and entry_price > self.params.MAX_NO_ENTRY_CENTS:
             return None
         
@@ -1066,52 +1068,86 @@ def main():
     parser.add_argument("--out", default="backtest_harness_results.json", help="Output path")
     parser.add_argument("--series", nargs="+", default=["KXBTC15M", "KXETH15M"], help="Series to test")
     parser.add_argument("--days", type=int, default=30, help="Days of history")
+    parser.add_argument("--start-date", help="Start date YYYY-MM-DD (overrides --days)")
+    parser.add_argument("--end-date", help="End date YYYY-MM-DD")
+    parser.add_argument("--max-markets", type=int, default=None, help="Max markets per series")
+    parser.add_argument("--use-historical", action="store_true", default=True, help="Use historical settled markets (default: True)")
+    parser.add_argument("--use-tick-store", action="store_true", help="Use tick_store for spot replay instead")
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s — %(message)s")
     
-    # Fetch market data from tick_store
-    tick_store = get_tick_store()
-    end_ts = time.time()
-    start_ts = end_ts - args.days * 86400
-    
-    all_markets = {}
-    markets_by_time = []
-    
-    for series in args.series:
-        markets = tick_store.query_ticks_all_venues(
-            symbol=series.replace("KX", "").replace("15M", "USDT"),
-            start_ts=start_ts,
-            end_ts=end_ts
+    if args.use_tick_store:
+        # Original tick_store-based approach (for spot price replay)
+        tick_store = get_tick_store()
+        end_ts = time.time()
+        start_ts = end_ts - args.days * 86400
+        
+        all_markets = {}
+        markets_by_time = []
+        
+        for series in args.series:
+            markets = tick_store.query_ticks_all_venues(
+                symbol=series.replace("KX", "").replace("15M", "USDT"),
+                start_ts=start_ts,
+                end_ts=end_ts
+            )
+            # Reconstruct (simplified)
+            replayer = MarketReplayer(tick_store)
+            series_markets = replayer.get_market_series(series, start_ts, end_ts)
+            
+            # Add to combined
+            for ticker, snaps in series_markets.items():
+                all_markets[ticker] = snaps
+            
+            # For walk-forward, create time-sorted list
+            # Group by day
+            daily = {}
+            for ticker, snaps in series_markets.items():
+                for snap in snaps:
+                    day = datetime.fromtimestamp(snap.timestamp, tz=timezone.utc).date().isoformat()
+                    if day not in daily:
+                        daily[day] = {}
+                    if ticker not in daily[day]:
+                        daily[day][ticker] = []
+                    daily[day][ticker].append(snap)
+            
+            for day in sorted(daily.keys()):
+                day_ts = datetime.fromisoformat(day).timestamp()
+                markets_by_time.append((day_ts, daily[day]))
+        
+        # Settlement function (would query Kalshi or local DB)
+        def _cli_settlement_fn(ticker):
+            # Placeholder: would look up actual settlement
+            return np.random.random() > 0.5
+        
+        settlement_fn = _cli_settlement_fn
+    else:
+        # New: Use historical settled markets with real outcomes
+        from historical_loader import load_backtest_data, get_markets_by_time
+        
+        # Calculate date range
+        if args.start_date:
+            start_date = args.start_date
+        else:
+            start_date = (datetime.now(timezone.utc) - pd.Timedelta(days=args.days)).date().isoformat()
+        
+        end_date = args.end_date
+        
+        log.info(f"Loading historical data for {args.series} from {start_date} to {end_date or 'now'}")
+        
+        all_markets, settlement_fn, all_metadata = load_backtest_data(
+            series=args.series,
+            start_date=start_date,
+            end_date=end_date,
+            max_markets_per_series=args.max_markets,
+            snapshots_per_market=10,
         )
-        # Reconstruct (simplified)
-        replayer = MarketReplayer(tick_store)
-        series_markets = replayer.get_market_series(series, start_ts, end_ts)
         
-        # Add to combined
-        for ticker, snaps in series_markets.items():
-            all_markets[ticker] = snaps
+        # Create walk-forward grouping
+        markets_by_time = get_markets_by_time(all_markets, all_metadata)
         
-        # For walk-forward, create time-sorted list
-        # Group by day
-        daily = {}
-        for ticker, snaps in series_markets.items():
-            for snap in snaps:
-                day = datetime.fromtimestamp(snap.timestamp, tz=timezone.utc).date().isoformat()
-                if day not in daily:
-                    daily[day] = {}
-                if ticker not in daily[day]:
-                    daily[day][ticker] = []
-                daily[day][ticker].append(snap)
-        
-        for day in sorted(daily.keys()):
-            day_ts = datetime.fromisoformat(day).timestamp()
-            markets_by_time.append((day_ts, daily[day]))
-    
-    # Settlement function (would query Kalshi or local DB)
-    def settlement_fn(ticker):
-        # Placeholder: would look up actual settlement
-        return np.random.random() > 0.5
+        log.info(f"Loaded {len(all_markets)} markets, {len(markets_by_time)} walk-forward days")
     
     # Run sweep
     results = run_sweep(
