@@ -106,3 +106,4 @@ settled_since.json
 real_markets.json
 best_params_real.json
 backtest_real_results.json
+logs/

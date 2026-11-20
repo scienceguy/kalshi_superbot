@@ -256,9 +256,12 @@ def test_hedge_contracts_are_two_decimal_fractions():
         yes_liquidity=100, no_liquidity=100, minutes_left=8.0,  # within 4-11min window (minutes_in=7.0)
     )
     # Patch config to use hedge band that matches test data (HEDGE band 82-88)
+    # Also patch entry window to match test's minutes_in=7.0 (default is 4-11 in code, but .env may override)
     with patch('signals.config.HEDGE_MIN_NO_ENTRY_CENTS', 82), \
          patch('signals.config.HEDGE_MAX_NO_ENTRY_CENTS', 88), \
-         patch('signals.config.NO_PRICE_IS_COMPLEMENT', False):
+         patch('signals.config.NO_PRICE_IS_COMPLEMENT', False), \
+         patch('signals.config.ENTRY_WINDOW_START_MIN', 4.0), \
+         patch('signals.config.ENTRY_WINDOW_END_MIN', 11.0):
         res = _evaluate_hedge(m, 1.0)  # $1 budget at 84c -> 1.19 -> floored to 1.19
         sig = res[0]
         assert sig.is_trade
