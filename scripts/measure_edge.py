@@ -28,6 +28,7 @@ comment; do not edit the constant by hand.
 import argparse
 import math
 import sqlite3
+from datetime import datetime
 
 FEE_MULTIPLIER = 0.07  # Kalshi taker: 0.07 * p * (1 - p) per contract
 
@@ -73,7 +74,14 @@ def load_quotes(db):
             mid = (bid + ask) / 2.0
             if not 0.0 < mid < 1.0:
                 continue
-            minutes_left = (m["close_ts"] - r["end_ts"]) / 60.0
+            # Parse timestamps to calculate minutes left
+            try:
+                close_ts = datetime.fromisoformat(m["close_ts"].replace('Z', '+00:00'))
+                end_ts = datetime.fromisoformat(r["end_ts"].replace('Z', '+00:00'))
+                minutes_left = (close_ts - end_ts).total_seconds() / 60.0
+            except Exception:
+                # Fallback if parsing fails
+                minutes_left = 0.0
             quotes.append({
                 "ticker": r["ticker"],
                 "series": m["series"],

@@ -221,10 +221,10 @@ def download_markets(
         return 0
 
     df = pd.DataFrame(all_markets)
-    # Normalize timestamp fields
+    # Normalize timestamp fields - API returns ISO 8601 strings
     for col in ("open_time", "close_time", "settlement_ts", "created_time", "updated_time"):
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], unit="ms", errors="coerce")
+            df[col] = pd.to_datetime(df[col], errors="coerce")
 
     # Hive partition by date
     date_col = "settlement_ts" if "settlement_ts" in df.columns else "close_time"

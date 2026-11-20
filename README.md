@@ -44,13 +44,26 @@ Key variables:
 - `supabase_client.py` — Supabase REST client (circuit breaker + batched writes)
 - `llm_eval.py` — LLM trade evaluation (7-layer fallback: OpenRouter/Groq/DeepSeek/OpenAI/Gemini/DSH/Ollama)
 - `latency_arb.py` — Latency arbitrage strategy (off hot path)
-- `backtest.py` / `parallel_backtest.py` — Parameter sweep backtester
+- `backtest_engine.py` / `backtest_harness.py` — **canonical** backtesters (shared entry/P&L core + unified harness with tick-store replay, walk-forward splits and parameter freezing)
+- `position_sizing.py` — Kelly-fraction sizing with equity/depth/per-market caps (imported by `backtest_harness.py`)
+- `kl_divergence.py` — **canonical** KL-divergence layer (Bernoulli KL edge score, ladder KL, ensemble disagreement gate)
+- `kl_realtime_v3.py` — real-time KL + box-arbitrage dry-run loop
+- `gbm_fair_value.py` / `fair_value_edge.py` / `box_arbitrage.py` — GBM fair value, edge = `q_lcb - ask - fee - slippage`, cross-venue box engine
+- `forecaster.py` / `forecast14.py` — multi-model 14-day forecast; the moonshot probability is reported as an upper bound only
+- `spot_composite.py` / `binance_feed.py` — Binance + Coinbase composite spot with failover
+- `dual_venue.py` — independent Kalshi/Polymarket orchestration
+- `outbox.py` — transactional outbox feeding the Supabase/n8n replicas
+- `mempalace_bridge.py` / `agent_protocol.py` — single-owner MemPalace access + inter-agent envelope/veto protocol
+- `event_hotpath.py` — event-driven hot path (WS-tick-driven, off the 15 s poll)
+- `scripts/measure_edge.py` — realized win rate per price band from settled markets (run before touching any band constant)
+- `scripts/measure_maker_edge.py` / `scripts/quote_recorder.py` — maker-vs-taker net edge + order-book recorder feeding it
 - `data_collector.py` — Historical market data collector
 - `kalshieye_downloader.py` — Kalshi Eye orderbook downloader
-- `inject_n8n_workflows.py` — n8n workflow injector (idempotent)
+- `inject_n8n_workflows.py` — n8n workflow injector (deprecated: `n8n/workflows/*.json` + `scripts/import_n8n_workflows.py` is the import path)
 - `add_n8n_credentials.py` — n8n credential injector (deprecated, use `scripts/n8n_creds_sync.py`)
 - `local_db.py` — Local SQLite WAL (source of truth for decisions, fills, ledger, settlements)
-- `tests/` — Pytest test suite (254 tests)
+- `archive/` — retired variants (old `backtest.py`, `parallel_backtest.py`, `legacy/`, superseded KL/backtest scripts and the simulate-to-a-balance script); **not on any live or paper path**
+- `tests/` — Pytest test suite
 
 ## Data Flow (Local-First)
 

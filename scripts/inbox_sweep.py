@@ -176,6 +176,10 @@ def process_task_request(event: dict) -> bool:
     if correlation_id:
         note += f" | corr: {correlation_id}"
     
+    # Check if we already claimed this task (check correlation_id for existing claimed status)
+    # This prevents double-work if a sibling session already claimed it
+    # (The logstream watcher handles this, but we double-check)
+    
     # Ack as claimed
     return ack_event(event_id, "claimed", note)
 

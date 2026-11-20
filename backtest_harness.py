@@ -30,6 +30,10 @@ import pandas as pd
 import config
 from fees import buy_cash_out, sell_cash_in, FEE_RATE as KALSHI_FEE_RATE
 from tick_store import get_tick_store
+from position_sizing import (
+    KellyResult, PositionSizingParams, calculate_kelly, 
+    estimate_kelly_from_trades, calculate_position_size
+)
 
 log = logging.getLogger("backtest_harness")
 
@@ -363,6 +367,20 @@ class BacktestEngine:
         self.daily_pnl = {}
         self.open_positions = {}
         
+        # Kelly position sizing
+        self.kelly_params = PositionSizingParams(
+            kelly_fraction=0.5,  # Half-Kelly by default
+            max_position_pct=params.PER_TRADE_PCT,
+            max_total_exposure_pct=params.EXPOSURE_CEILING_PCT,
+            min_trade_dollars=1.0,
+            max_trade_dollars=params.MAX_TRADE_DOLLARS,
+            max_drawdown_pct=params.MAX_DAILY_LOSS_PCT,
+            kelly_lookback_trades=params.CONSECUTIVE_LOSS_LIMIT * 10,  # Use more trades
+            min_win_rate_for_kelly=0.45,
+            fixed_fraction_fallback=params.BALANCE_PCT_PER_TRADE,
+        )
+        self.completed_trades_for_kelly: List[Dict] = []  # Track trades for Kelly estimation
+        
     def run_backtest(
         self,
         markets: Dict[str, List[MarketSnapshot]],
@@ -499,17 +517,30 @@ class BacktestEngine:
         if np.random.random() > fill_prob:
             return None  # Not filled
         
-        # Position sizing
-        max_dollars = min(
-            self.params.MAX_TRADE_DOLLARS,
-            self.balance * self.params.BALANCE_PCT_PER_TRADE,
-            self.balance * self.params.PER_TRADE_PCT
+        # Kelly-based position sizing
+        kelly_result = estimate_kelly_from_trades(
+            self.completed_trades_for_kelly,
+            kelly_fraction=self.kelly_params.kelly_fraction,
+            lookback=self.kelly_params.kelly_lookback_trades,
         )
-        cost_per_contract = entry_price / 100.0
-        contracts = max_dollars / cost_per_contract if cost_per_contract > 0 else 0
+        
+        # Calculate current exposure (simplified - sum of dollar risk of open positions)
+        current_exposure = sum(p.dollar_risk for p in self.open_positions.values())
+        
+        contracts, meta = calculate_position_size(
+            balance=self.balance,
+            kelly_result=kelly_result,
+            entry_price=entry_price,
+            params=self.kelly_params,
+            current_exposure=current_exposure,
+            open_positions=len(self.open_positions),
+            max_open_positions=self.params.MAX_OPEN_POSITIONS,
+        )
         
         if contracts < 0.01:
             return None
+        
+        log.debug(f"Kelly sizing: {meta}")
         
         # Fees: maker pays no fee (or gets rebate)
         taker_fee = False
@@ -583,17 +614,29 @@ class BacktestEngine:
         if np.random.random() > fill_prob:
             return None
         
-        # Sizing
-        max_dollars = min(
-            self.params.MAX_TRADE_DOLLARS,
-            self.balance * self.params.BALANCE_PCT_PER_TRADE,
-            self.balance * self.params.PER_TRADE_PCT
+        # Kelly-based position sizing
+        kelly_result = estimate_kelly_from_trades(
+            self.completed_trades_for_kelly,
+            kelly_fraction=self.kelly_params.kelly_fraction,
+            lookback=self.kelly_params.kelly_lookback_trades,
         )
-        cost_per_contract = entry_price / 100.0
-        contracts = max_dollars / cost_per_contract if cost_per_contract > 0 else 0
+        
+        current_exposure = sum(p.dollar_risk for p in self.open_positions.values())
+        
+        contracts, meta = calculate_position_size(
+            balance=self.balance,
+            kelly_result=kelly_result,
+            entry_price=entry_price,
+            params=self.kelly_params,
+            current_exposure=current_exposure,
+            open_positions=len(self.open_positions),
+            max_open_positions=self.params.MAX_OPEN_POSITIONS,
+        )
         
         if contracts < 0.01:
             return None
+        
+        log.debug(f"Kelly sizing: {meta}")
         
         # Taker fee on entry
         taker_fee = True
@@ -657,6 +700,14 @@ class BacktestEngine:
         if day_key not in self.daily_pnl:
             self.daily_pnl[day_key] = 0.0
         self.daily_pnl[day_key] += result.pnl
+        
+        # Track completed trade for Kelly estimation
+        self.completed_trades_for_kelly.append({
+            'pnl': result.pnl,
+            'won': result.won,
+            'entry_price': result.entry_price,
+            'dollar_risk': result.dollar_risk,
+        })
     
     def _compute_metrics(self) -> Dict[str, Any]:
         """Compute final backtest metrics."""

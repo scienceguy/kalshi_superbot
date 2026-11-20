@@ -93,10 +93,13 @@ data/crossvenue/
 *.pkl
 *.safetensors
 
-# Markdown working notes (keep README.md and AGENTS.md)
+# Markdown working notes (keep README.md, AGENTS.md and the task/audit deliverables)
 *.md
 !README.md
 !AGENTS.md
+!AGENT_TASKSv13.md
+!AUDIT_REPORT_v13.md
+!HANDOFF.md
 SUMMARY_README
 settled_since.json
 .continuity/
@@ -107,3 +110,12 @@ real_markets.json
 best_params_real.json
 backtest_real_results.json
 logs/
+
+# Runtime state / generated artifacts (never commit)
+tick_db/
+.inbox_cursor
+backtest_harness_results.json
+backtest_harness_sweep_results.json
+backtest_sweep_eth_real_klines.json
+backtest_sweep_real_klines.json
+archive/__pycache__/

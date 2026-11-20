@@ -458,6 +458,12 @@ LLM_MIN_REQUEST_GAP = _env_float("LLM_MIN_REQUEST_GAP", 3.0)  # seconds between 
 # ═════════════════════════════════════════════════════════════════════
 N8N_API_KEY = os.environ.get("N8N_API_KEY", "")
 N8N_BASE_URL = os.environ.get("N8N_BASE_URL", "http://127.0.0.1:5678")
+# Spill file path for dropped webhooks (T13-04: no-drop ledger) — configurable so it can
+# survive reboots (e.g., set to a persistent location like /var/lib/superbot/spill.jsonl)
+N8N_SPILL_FILE_PATH = Path(os.environ.get(
+    "N8N_SPILL_FILE_PATH",
+    "/tmp/n8n_webhook_spill.jsonl"
+))
 
 # EXCHANGE / ORACLE APIS (cross-reference price feeds)
 # Public endpoints — no auth required. Used to compare Kalshi prediction

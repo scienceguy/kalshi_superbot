@@ -42,7 +42,7 @@ _webhook_worker_started = False
 _webhook_worker_lock = threading.Lock()
 
 # Spill file for dropped webhooks (T13-04: no-drop ledger)
-_SPILL_FILE = Path("/tmp/n8n_webhook_spill.jsonl")
+_SPILL_FILE = config.N8N_SPILL_FILE_PATH
 _spill_lock = threading.Lock()
 
 
