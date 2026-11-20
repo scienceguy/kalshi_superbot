@@ -234,6 +234,14 @@ BRTI_STALE_SECONDS = _env_float("BRTI_STALE_SECONDS", 2.0)  # Max age for entry 
 # Fallback to REST composite_price if WS not available
 BRTI_FALLBACK_TO_REST = _env_bool("BRTI_FALLBACK_TO_REST", True)
 
+# Venue Books & Book-Age Gate (T15-12)
+# Max age for orderbook to be considered fresh for trading decisions
+BOOK_MAX_AGE_SECONDS = _env_float("BOOK_MAX_AGE_SECONDS", 2.0)
+# Max exchange-to-receive latency for WS books
+BOOK_MAX_EXCHANGE_LATENCY = _env_float("BOOK_MAX_EXCHANGE_LATENCY", 1.0)
+# Enable book-age gate (refuse trades on stale/one-sided books)
+BOOK_AGE_GATE_ENABLED = _env_bool("BOOK_AGE_GATE_ENABLED", True)
+
 # Local DB → Supabase background sync interval. Trading bots need fast crash
 # protection: a 5-minute sync window can lose up to 5 minutes of P&L/state on
 # a crash. 30s keeps the local→online gap small without hammering Supabase.
