@@ -291,7 +291,7 @@ def main():
         sys.exit(0 if success else 1)
 
     if args.watch:
-        print(f"👁️  Watching inbox for {AGENT_IDENTITY}...")
+        print(f"[WATCH] Watching inbox for {AGENT_IDENTITY}...")
         try:
             while True:
                 events = sweep_inbox(once=True, limit=args.limit)

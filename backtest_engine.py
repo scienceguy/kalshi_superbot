@@ -68,7 +68,7 @@ def simulate_trade(market, params, balance=100.0, settlement_yes_won=None):
 
     Returns a result dict or None if no signal.
 
-    ⚠️  LOOKAHEAD BIAS WARNING: When bid/ask data is available, the entry price
+    [WARNING] LOOKAHEAD BIAS WARNING: When bid/ask data is available, the entry price
     proxy uses bid/ask mid. When only settlement data is available (no orderbook
     history), a fixed synthetic entry price of 45c for YES is used. This is a
     simplifying assumption: it models always entering YES at 45c, which is an
@@ -412,7 +412,7 @@ def run_sweep(markets, settlement_yes_won=None, quick=False, limit=None,
         out_path: JSON output path.
         starting_balance: cash per backtest run.
 
-    ⚠️  MEMORY WARNING: `Pool` pickles the full `markets` list into every worker
+    [WARNING] MEMORY WARNING: `Pool` pickles the full `markets` list into every worker
     process, so memory scales as `jobs × markets_size`. On large datasets this
     can OOM small hosts (e.g. termux). `jobs` is capped at CPU count; for very
     large datasets reduce `--jobs` further or pre-filter markets with `--limit`.

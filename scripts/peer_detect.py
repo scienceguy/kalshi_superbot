@@ -31,7 +31,7 @@ def watch_heartbeats(once: bool = False) -> None:
         "--json",
     ]
 
-    print(f"👁️  Watching for peer heartbeats on {STREAM}/{ROOM}/{TOPIC}...")
+    print(f"[WATCH] Watching for peer heartbeats on {STREAM}/{ROOM}/{TOPIC}...")
 
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

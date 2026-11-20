@@ -54,7 +54,7 @@ class RiskManager:
         effective_exposure = mark_to_market_exposure if mark_to_market_exposure is not None else exposure
         total_value = cash + effective_exposure
         if total_value <= 0:
-            log.warning("⚠️  total_value=$%.2f <= 0 — skipping session_high/drawdown update", total_value)
+            log.warning("[WARNING] total_value=$%.2f <= 0 -- skipping session_high/drawdown update", total_value)
             return
         if total_value > self.state.session_high:
             self.state.session_high = total_value

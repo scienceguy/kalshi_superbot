@@ -103,11 +103,11 @@ class MarketSnapshotCollector:
     def _build_snapshot(self, market: dict) -> dict | None:
         """Build a training snapshot from a closed market.
 
-        ⚠️  LOOKAHEAD BIAS WARNING: This function uses `last_price_dollars`
+        [WARNING] LOOKAHEAD BIAS WARNING: This function uses `last_price_dollars`
         (the last observed price before settlement) as the entry price proxy
         when available. This price reflects information available near the end
         of the 15-minute window, NOT at entry time. Backtest results on this
-        data will be OPTIMISTIC vs. live trading — treat as an upper bound on
+        data will be OPTIMISTIC vs. live trading -- treat as an upper bound on
         EV, not a prediction of live performance.
         """
         ticker = market.get("ticker", "")

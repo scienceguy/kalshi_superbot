@@ -74,7 +74,7 @@ def claim_task(correlation_id: str) -> bool:
             events = json.loads(result.stdout)
             for event in events.get("events", []):
                 if event.get("from_agent") == AGENT_IDENTITY and event.get("status") == "claimed":
-                    print(f"⚠️  Already claimed by us: {correlation_id}")
+                    print(f"[WARNING] Already claimed by us: {correlation_id}")
                     return False
     except Exception:
         pass
