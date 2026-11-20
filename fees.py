@@ -40,7 +40,7 @@ def taker_fee_dollars(contracts: float, price_dollars: float, multiplier: float 
     if contracts <= 0 or price_dollars <= 0:
         return 0.0
     raw = multiplier * FEE_RATE * contracts * price_dollars * (1.0 - price_dollars)
-    return math.ceil((raw + 1e-12) * 1_000_000) / 1_000_000
+    return math.ceil(raw * 1_000_000 - 1e-9) / 1_000_000
 
 
 def taker_fee_cents(contracts: float, price_dollars: float, multiplier: float = 1.0) -> float:
