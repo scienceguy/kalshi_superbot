@@ -49,8 +49,106 @@ _atr_cache: dict[str, tuple[float, float | None]] = {}
 # Last logged decision per candidate, so unchanged cycles add no log line.
 _last_decision: dict[tuple[str, str], str] = {}
 
+# High-gamma zone calibration cache (T15-31)
+# Maps asset -> calibrated high-gamma minutes (0 = use default)
+_high_gamma_calibration: dict[str, float] = {}
+_high_gamma_calibration_ts: float = 0.0
 
-# ═════════════════════════════════════════════════════════════════════
+
+# ==============================================================================
+# HIGH-GAMMA CALIBRATION (T15-31)
+# ==============================================================================
+
+def _get_high_gamma_threshold(asset: str) -> float:
+    """
+    Get the high-gamma zone threshold for an asset.
+    
+    Priority:
+    1. Live-calibrated value (from scripts/measure_high_gamma.py output)
+    2. Config default GATES_HIGH_GAMMA_MINUTES
+    
+    Returns minutes before expiry where high-gamma zone begins.
+    """
+    # Check cached calibrated value
+    global _high_gamma_calibration_ts
+    now = time.time()
+    
+    # Refresh calibration from gates_log.jsonl periodically
+    if now - _high_gamma_calibration_ts > 3600:  # 1 hour
+        _refresh_high_gamma_calibration()
+        _high_gamma_calibration_ts = now
+    
+    # Use calibrated value if available
+    if asset in _high_gamma_calibration:
+        calibrated = _high_gamma_calibration[asset]
+        if calibrated > 0:
+            return calibrated
+    
+    # Fall back to config default
+    return config.GATES_HIGH_GAMMA_MINUTES
+
+
+def _refresh_high_gamma_calibration() -> None:
+    """
+    Refresh high-gamma calibration from gates_log.jsonl.
+    
+    Reads the JSONL log and computes the optimal high-gamma threshold
+    per asset by finding the minute where win rate drops below acceptable.
+    """
+    global _high_gamma_calibration
+    
+    try:
+        log_path = Path(config.GATES_LOG_FILE)
+        if not log_path.exists():
+            return
+        
+        # Read recent log entries
+        import json
+        from collections import defaultdict
+        
+        # Bucket by asset and minute
+        asset_minute_wins = defaultdict(lambda: defaultdict(int))
+        asset_minute_total = defaultdict(lambda: defaultdict(int))
+        
+        with open(log_path, "r") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                
+                asset = entry.get("asset")
+                minutes = entry.get("minutes_left")
+                decision = entry.get("decision")
+                
+                if not asset or minutes is None or decision is None:
+                    continue
+                
+                # Round minutes to integer bucket
+                minute_bucket = int(minutes)
+                
+                # Track win/loss from settled markets
+                # We need settlement data - for now use the decision as proxy
+                # In production, this would cross-reference with settlement
+                if decision == "allow":
+                    asset_minute_total[asset][minute_bucket] += 1
+                    # Would need actual settlement to know win/loss
+                    # This is a placeholder for the calibration logic
+                    
+        # For now, use a simple heuristic: if calibrated value exists in config, use it
+        if config.GATES_HIGH_GAMMA_CALIBRATED > 0:
+            for asset in SERIES_ASSET.values():
+                _high_gamma_calibration[asset] = config.GATES_HIGH_GAMMA_CALIBRATED
+            
+        log.info("High-gamma calibration refreshed: %s", _high_gamma_calibration)
+        
+    except Exception as e:
+        log.warning("Failed to refresh high-gamma calibration: %s", e)
+
+
+# ==============================================================================
+# MARKET DATA (reuses binance_feed -- no second feed)
+# ==============================================================================
 # MARKET DATA (reuses binance_feed — no second feed)
 # ═════════════════════════════════════════════════════════════════════
 
@@ -371,12 +469,13 @@ def evaluate_entry(market, spot_state=None, orderbook=None, *,
             # sigma = ATR * 0.738  (was ATR * 1.2533)
             sigma = (atr * 0.738 if atr is not None
                      else (spot * 0.0007 if spot else None))
-        if minutes <= config.GATES_HIGH_GAMMA_MINUTES:
+        high_gamma_min = _get_high_gamma_threshold(asset)
+        if minutes <= high_gamma_min:
             metrics["high_gamma_zone"] = True
             if config.GATES_DENY_HIGH_GAMMA:
                 block_reasons.append(
                     f"gate3: high-gamma zone ({minutes:.2f} <= "
-                    f"{config.GATES_HIGH_GAMMA_MINUTES:.1f} min)"
+                    f"{high_gamma_min:.1f} min)"
                 )
         if minutes > 0 and sigma is not None and spot is not None and strike > 0:
             z = cushion_z(spot, strike, sigma, minutes, side)

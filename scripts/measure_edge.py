@@ -45,7 +45,11 @@ def taker_fee(p):
 
 
 def load_quotes(db):
-    """Return (markets_by_ticker, quotes) for every quote with a settled outcome."""
+    """Return (markets_by_ticker, quotes) for every quote with a settled outcome.
+
+    Returns quotes in their native price (YES price for YES contracts, NO price for NO contracts).
+    The "favourite" is the side priced in the favourite band (95-99c).
+    """
     conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -58,37 +62,57 @@ def load_quotes(db):
                     "series": r["series"],
                     "open_ts": r["open_ts"],
                     "close_ts": r["close_ts"],
-                    "won": res == "yes",
+                    "result": res,  # "yes" or "no"
                 }
 
         quotes = []
         for r in conn.execute(
-                "select ticker, end_ts, yes_bid, yes_ask from candles "
-                "where yes_bid is not null and yes_ask is not null"):
+                "select ticker, end_ts, yes_bid, yes_ask, no_bid, no_ask from candles "
+                "where (yes_bid is not null and yes_ask is not null) "
+                "   or (no_bid is not null and no_ask is not null)"):
             m = markets.get(r["ticker"])
             if m is None:
                 continue
-            bid, ask = r["yes_bid"], r["yes_ask"]
-            if not (0.0 < bid < 1.0 and 0.0 < ask < 1.0):
-                continue
-            mid = (bid + ask) / 2.0
-            if not 0.0 < mid < 1.0:
-                continue
+            result = m["result"]
             # Parse timestamps to calculate minutes left
             try:
                 close_ts = datetime.fromisoformat(m["close_ts"].replace('Z', '+00:00'))
                 end_ts = datetime.fromisoformat(r["end_ts"].replace('Z', '+00:00'))
                 minutes_left = (close_ts - end_ts).total_seconds() / 60.0
             except Exception:
-                # Fallback if parsing fails
                 minutes_left = 0.0
-            quotes.append({
-                "ticker": r["ticker"],
-                "series": m["series"],
-                "mid": mid,
-                "minutes_left": minutes_left,
-                "won": m["won"],
-            })
+
+            # YES side - native YES price
+            if r["yes_bid"] is not None and r["yes_ask"] is not None:
+                bid, ask = r["yes_bid"], r["yes_ask"]
+                if 0.0 < bid < 1.0 and 0.0 < ask < 1.0:
+                    mid = (bid + ask) / 2.0
+                    if 0.0 < mid < 1.0:
+                        won = (result == "yes")
+                        quotes.append({
+                            "ticker": r["ticker"],
+                            "series": m["series"],
+                            "mid": mid,
+                            "minutes_left": minutes_left,
+                            "won": won,
+                            "side": "yes",
+                        })
+
+            # NO side - native NO price (not YES-equivalent)
+            if r["no_bid"] is not None and r["no_ask"] is not None:
+                bid, ask = r["no_bid"], r["no_ask"]
+                if 0.0 < bid < 1.0 and 0.0 < ask < 1.0:
+                    mid = (bid + ask) / 2.0
+                    if 0.0 < mid < 1.0:
+                        won = (result == "no")
+                        quotes.append({
+                            "ticker": r["ticker"],
+                            "series": m["series"],
+                            "mid": mid,
+                            "minutes_left": minutes_left,
+                            "won": won,
+                            "side": "no",
+                        })
     finally:
         conn.close()
     return markets, quotes

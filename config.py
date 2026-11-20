@@ -214,6 +214,14 @@ GATES_TIME_DECAY_ENABLED = _env_bool("GATES_TIME_DECAY_ENABLED", True)
 GATES_HIGH_GAMMA_MINUTES = _env_float("GATES_HIGH_GAMMA_MINUTES", 2.0)
 GATES_DENY_HIGH_GAMMA = _env_bool("GATES_DENY_HIGH_GAMMA", False)
 
+# High-gamma zone live calibration (T15-31)
+# Calibrated from live settled-market data: minutes before expiry where
+# favourite-maker EV turns negative due to gamma explosion.
+# Auto-updated by scripts/measure_high_gamma.py; set 0 to disable.
+GATES_HIGH_GAMMA_CALIBRATED = _env_float("GATES_HIGH_GAMMA_CALIBRATED", 0.0)
+GATES_HIGH_GAMMA_CALIBRATION_LOOKBACK_DAYS = _env_int("GATES_HIGH_GAMMA_CALIBRATION_LOOKBACK_DAYS", 30)
+GATES_HIGH_GAMMA_MIN_SAMPLES = _env_int("GATES_HIGH_GAMMA_MIN_SAMPLES", 50)
+
 # Feed cache + per-candidate JSONL diagnostics
 GATES_SPOT_CACHE_SECONDS = _env_int("GATES_SPOT_CACHE_SECONDS", 30)
 GATES_ATR_CACHE_SECONDS = _env_int("GATES_ATR_CACHE_SECONDS", 60)

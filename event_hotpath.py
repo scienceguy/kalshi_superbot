@@ -112,6 +112,10 @@ class HotPathConfig:
     decision_to_wire_budget_ms: int = 300
     end_to_end_budget_ms: int = 1000
 
+    # Latency regression gate (T15-34)
+    # Block trading if P95 end-to-end latency exceeds this threshold (ms)
+    latency_gate_p95_threshold_ms: int = 100
+
     # Precomputation
     llm_cache_ttl_seconds: int = 300  # 5 minutes
     model_refresh_interval: float = 60.0  # 1 minute
@@ -675,20 +679,42 @@ class EventHotPath:
 
     def get_stats(self) -> Dict:
         """Get current stats."""
+        latency_stats = {}
+        for name, vals in self.latencies.items():
+            if vals:
+                sorted_vals = sorted(vals)
+                latency_stats[name] = {
+                    "count": len(vals),
+                    "p50": sorted_vals[len(vals)//2],
+                    "p95": sorted_vals[int(len(vals)*0.95)],
+                    "p99": sorted_vals[int(len(vals)*0.99)],
+                }
+            else:
+                latency_stats[name] = {"count": 0, "p50": 0, "p95": 0, "p99": 0}
+        
         return {
             "running": self._running,
             "market_count": len(self.market_states),
-            "latencies": {
-                name: {
-                    "count": len(vals),
-                    "p50": sorted(vals)[len(vals)//2] if vals else 0,
-                    "p95": sorted(vals)[int(len(vals)*0.95)] if vals else 0,
-                    "p99": sorted(vals)[int(len(vals)*0.99)] if vals else 0,
-                }
-                for name, vals in self.latencies.items()
-            },
+            "latencies": latency_stats,
             "http_pool_active": self.http_pool._session is not None,
+            "latency_gate_ok": self.is_latency_healthy(),
         }
+
+    def is_latency_healthy(self) -> bool:
+        """
+        Latency regression gate (T15-34).
+        
+        Returns True if P95 end-to-end latency is below the threshold.
+        This should be checked before placing trades to avoid trading
+        when the system is experiencing latency degradation.
+        """
+        vals = self.latencies.get("end_to_end", [])
+        if not vals:
+            return True  # No data yet, assume healthy
+        
+        sorted_vals = sorted(vals)
+        p95 = sorted_vals[int(len(vals) * 0.95)]
+        return p95 < self.config.latency_gate_p95_threshold_ms
 
 
 # ─── Factory ──────────────────────────────────────────────────────────────────

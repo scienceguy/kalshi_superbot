@@ -26,6 +26,18 @@ from typing import Dict, List, Optional, Tuple
 import config
 import fees
 
+# KL divergence integration (T15-35)
+try:
+    from kl_divergence import (
+        kl_edge_score,
+        ladder_kl,
+        ensemble_disagreement_gate,
+        compute_kl_gates,
+    )
+    KL_AVAILABLE = True
+except ImportError:
+    KL_AVAILABLE = False
+
 log = logging.getLogger("box_arbitrage")
 
 
@@ -55,6 +67,12 @@ class BoxOpportunity:
     settlement_equivalence_proven: bool
     tagged_as: str                 # "box" or "directional"
     timestamp: str
+    
+    # KL divergence metrics (T15-35)
+    kl_edge: float = 0.0           # Bernoulli KL edge score
+    ladder_kl: float = 0.0         # Ladder KL across strikes
+    ensemble_kl: float = 0.0       # Ensemble disagreement
+    ensemble_allow: bool = True    # Ensemble gate result
 
 
 @dataclass
@@ -301,6 +319,61 @@ class BoxArbitrageEngine:
         
         self.opportunities_log.append(opportunity)
         return opportunity
+
+    def compute_kl_metrics(
+        self,
+        opportunity: BoxOpportunity,
+        model_prob_yes: float,
+        model_prob_no: float,
+        ensemble_probs: List[float] = None,
+        ladder_probs: Dict[float, float] = None,
+        market_ladder: Dict[float, float] = None,
+    ) -> BoxOpportunity:
+        """
+        Compute KL divergence metrics for a box opportunity (T15-35).
+        
+        Args:
+            opportunity: The box opportunity to score
+            model_prob_yes: Model probability for YES leg
+            model_prob_no: Model probability for NO leg
+            ensemble_probs: List of ensemble model probabilities
+            ladder_probs: Model-implied probabilities by strike
+            market_ladder: Market-implied probabilities by strike
+            
+        Returns:
+            Updated opportunity with KL metrics
+        """
+        if not KL_AVAILABLE:
+            return opportunity
+        
+        # Market prices from the opportunity legs
+        p_market_yes = opportunity.yes_leg.price_cents / 10000.0
+        p_market_no = opportunity.no_leg.price_cents / 10000.0
+        
+        # KL edge for each leg
+        kl_edge_yes = kl_edge_score(model_prob_yes, p_market_yes)
+        kl_edge_no = kl_edge_score(model_prob_no, p_market_no)
+        kl_edge = (kl_edge_yes + kl_edge_no) / 2.0
+        
+        # Ladder KL if provided
+        ladder_kl_val = 0.0
+        if ladder_probs and market_ladder:
+            ladder_kl_val = ladder_kl(ladder_probs, market_ladder)
+        
+        # Ensemble KL if provided
+        ensemble_kl_val = 0.0
+        ensemble_allow = True
+        if ensemble_probs:
+            ensemble_kl_val = ensemble_kl(ensemble_probs)
+            ensemble_allow = ensemble_disagreement_gate(ensemble_probs)[0]
+        
+        # Update opportunity with KL metrics
+        opportunity.kl_edge = kl_edge
+        opportunity.ladder_kl = ladder_kl_val
+        opportunity.ensemble_kl = ensemble_kl_val
+        opportunity.ensemble_allow = ensemble_allow
+        
+        return opportunity
     
     def execute_box(self, opportunity: BoxOpportunity, kalshi_client=None,
                      polymarket_client=None, dry_run: bool = True) -> BoxExecution:
@@ -425,6 +498,57 @@ def scan_for_boxes(kalshi_orderbooks: Dict[str, Dict], polymarket_orderbooks: Di
                     )
                     if opp:
                         opportunities.append(opp)
+    
+    return opportunities
+
+
+def scan_for_boxes_with_kl(
+    kalshi_orderbooks: Dict[str, Dict],
+    polymarket_orderbooks: Dict[str, Dict] = None,
+    model_probs: Dict[str, float] = None,  # ticker -> model probability for YES
+    ensemble_probs: Dict[str, List[float]] = None,  # ticker -> list of ensemble probs
+) -> List[BoxOpportunity]:
+    """
+    Scan orderbooks for box arbitrage opportunities with KL divergence integration (T15-35).
+    
+    Args:
+        kalshi_orderbooks: Dict[ticker] -> {"yes_ask": int, "yes_size": int, "no_ask": int, "no_size": int}
+        polymarket_orderbooks: Dict[ticker] -> {"yes_ask": int, "yes_size": int, "no_ask": int, "no_size": int}
+        model_probs: Dict[ticker] -> model probability for YES side
+        ensemble_probs: Dict[ticker] -> list of ensemble model probabilities
+    
+    Returns:
+        List of BoxOpportunity with KL metrics populated
+    """
+    opportunities = scan_for_boxes(kalshi_orderbooks, polymarket_orderbooks)
+    
+    if not KL_AVAILABLE or not model_probs:
+        return opportunities
+    
+    engine = get_box_engine()
+    
+    for opp in opportunities:
+        # Get model probabilities for the tickers involved
+        yes_ticker = opp.yes_leg.ticker
+        no_ticker = opp.no_leg.ticker
+        
+        model_prob_yes = model_probs.get(yes_ticker, 0.5)
+        model_prob_no = model_probs.get(no_ticker, 0.5)
+        
+        # For the same-venue case, we can use 1 - model_prob_yes for NO
+        if opp.same_venue:
+            model_prob_no = 1.0 - model_prob_yes
+        
+        # Get ensemble probs if available
+        ens_probs = ensemble_probs.get(yes_ticker) if ensemble_probs else None
+        
+        # Compute KL metrics
+        engine.compute_kl_metrics(
+            opportunity=opp,
+            model_prob_yes=model_prob_yes,
+            model_prob_no=model_prob_no,
+            ensemble_probs=ens_probs,
+        )
     
     return opportunities
 
