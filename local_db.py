@@ -213,6 +213,24 @@ class LocalDB:
                 )
             """)
 
+            # settlement_reference_basis: T13-11 Settlement-reference basis tracker
+            # Records the settlement reference price (CF Benchmarks BRTI for Kalshi,
+            # Binance 1m candle for Polymarket) versus the composite at window end.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS settlement_reference_basis (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    market_ticker TEXT NOT NULL,
+                    venue TEXT NOT NULL,           -- 'kalshi' or 'polymarket'
+                    settlement_ref_price REAL NOT NULL,  -- CF BRTI / Binance 1m close
+                    composite_price_at_settlement REAL NOT NULL,  -- our composite at window end
+                    basis_bps REAL NOT NULL,       -- (ref - composite) / composite * 10000
+                    settled_at TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_settlement_basis_ticker ON settlement_reference_basis(market_ticker, settled_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_settlement_basis_venue ON settlement_reference_basis(venue, settled_at)")
+
             # Create indexes for common queries
             conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)")
@@ -623,6 +641,72 @@ class LocalDB:
             except Exception as e:
                 log.warning("get_all_settled error: %s", e)
                 return {}
+
+    # ── settlement_reference_basis (T13-11) ──────────────────────────────────────
+
+    def record_settlement_basis(self, market_ticker: str, venue: str,
+                                 settlement_ref_price: float, composite_price_at_settlement: float,
+                                 settled_at: str) -> bool:
+        """Record settlement reference vs composite basis for a market."""
+        basis_bps = ((settlement_ref_price - composite_price_at_settlement) 
+                     / composite_price_at_settlement * 10000) if composite_price_at_settlement > 0 else 0.0
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO settlement_reference_basis
+                        (market_ticker, venue, settlement_ref_price, composite_price_at_settlement,
+                         basis_bps, settled_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (market_ticker, venue, settlement_ref_price, composite_price_at_settlement,
+                     basis_bps, settled_at),
+                )
+                conn.commit()
+                return True
+            except Exception as e:
+                log.warning("record_settlement_basis(%s, %s) error: %s", market_ticker, venue, e)
+                return False
+
+    def get_settlement_basis_history(self, venue: str = None, limit: int = 100) -> list:
+        """Get settlement basis history, optionally filtered by venue."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                if venue:
+                    rows = conn.execute(
+                        "SELECT * FROM settlement_reference_basis WHERE venue = ? ORDER BY settled_at DESC LIMIT ?",
+                        (venue, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM settlement_reference_basis ORDER BY settled_at DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
+                return [dict(r) for r in rows]
+            except Exception as e:
+                log.warning("get_settlement_basis_history error: %s", e)
+                return []
+
+    def get_average_basis_bps(self, venue: str, lookback_count: int = 50) -> Optional[float]:
+        """Get average basis in bps for a venue over recent settlements."""
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(AVG(basis_bps), 0.0) 
+                    FROM settlement_reference_basis 
+                    WHERE venue = ?
+                    ORDER BY settled_at DESC LIMIT ?
+                    """,
+                    (venue, lookback_count),
+                ).fetchone()
+                return float(row[0]) if row else None
+            except Exception as e:
+                log.warning("get_average_basis_bps error: %s", e)
+                return None
 
     # ── backtest_runs ───────────────────────────────────────────────────────────
 
