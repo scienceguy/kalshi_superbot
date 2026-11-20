@@ -1,5 +1,5 @@
 """
-llm_eval.py — LLM trade evaluation with a 7-layer fallback across free providers.
+llm_eval.py - LLM trade evaluation with a 7-layer fallback across free providers.
 
 Layers are tried in order; a layer is skipped when its API key is unset or its
 circuit breaker is open:
@@ -27,7 +27,7 @@ import os
 import re
 import stat
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import requests
 
@@ -36,7 +36,7 @@ import config
 log = logging.getLogger("llm_eval")
 
 # ── Timeout and retry config ─────────────────────────────────────────────────
-# Uses config._env_int / config._env_float (deduped — do not redefine here).
+# Uses config._env_int / config._env_float (deduped: do not redefine here).
 REQUEST_TIMEOUT = config._env_int("LLM_REQUEST_TIMEOUT", 20)
 MAX_RETRIES_PER_LAYER = config._env_int("LLM_MAX_RETRIES", 2)
 BACKOFF_BASE = config._env_float("LLM_BACKOFF_BASE", 1.0)
@@ -58,7 +58,7 @@ def _resolve_api_key(env_key: str) -> str:
             mode = stat.S_IMODE(os.stat(path).st_mode)
             if mode & 0o077:
                 log.warning(
-                    "%s_FILE %s has insecure permissions (mode %o) — "
+                    "%s_FILE %s has insecure permissions (mode %o) - "
                     "refusing to read. Set chmod 600.", env_key, path, mode,
                 )
                 return ""
@@ -167,7 +167,7 @@ def _is_circuit_open(layer_name: str) -> bool:
     if skip_until <= 0:
         return False
     if time.time() >= skip_until:
-        # Cooldown expired — reset and allow retry
+        # Cooldown expired - reset and allow retry
         _layer_skip_until.pop(layer_name, None)
         _layer_failures.pop(layer_name, None)
         return False
@@ -180,7 +180,7 @@ def _record_layer_failure(layer_name: str) -> None:
     if _layer_failures[layer_name] >= CIRCUIT_BREAKER_THRESHOLD:
         _layer_skip_until[layer_name] = time.time() + CIRCUIT_BREAKER_COOLDOWN
         log.warning(
-            "LLM layer %s circuit opened — skipping for %.0fs after %d failures",
+            "LLM layer %s circuit opened - skipping for %.0fs after %d failures",
             layer_name, CIRCUIT_BREAKER_COOLDOWN, _layer_failures[layer_name],
         )
 
@@ -191,6 +191,145 @@ def _record_layer_success(layer_name: str) -> None:
         _layer_failures.pop(layer_name, None)
     if layer_name in _layer_skip_until:
         _layer_skip_until.pop(layer_name, None)
+
+
+# ─── T13-25: Discovery-time LLM evaluation with TTL cache ───────────────────────
+# Cache: {market_ticker: (timestamp, verdict_dict)}
+# verdict: {"direction_bias": "yes|no|neutral", "event_risk": "none|low|medium|high",
+#           "confidence": 0-1, "reasons": [], "layer": str, "model": str}
+_discovery_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+DISCOVERY_CACHE_TTL = config._env_int("LLM_DISCOVERY_CACHE_TTL", 1800)  # 30 min default
+
+
+def _is_cached_valid(market_ticker: str) -> bool:
+    entry = _discovery_cache.get(market_ticker)
+    if not entry:
+        return False
+    ts, _ = entry
+    return time.time() - ts < DISCOVERY_CACHE_TTL
+
+
+def _get_cached_verdict(market_ticker: str) -> Optional[Dict[str, Any]]:
+    entry = _discovery_cache.get(market_ticker)
+    if entry and time.time() - entry[0] < DISCOVERY_CACHE_TTL:
+        return entry[1]
+    return None
+
+
+def _cache_verdict(market_ticker: str, verdict: Dict[str, Any]) -> None:
+    _discovery_cache[market_ticker] = (time.time(), verdict)
+
+
+def evaluate_market_discovery(market_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    T13-25: Evaluate a market at DISCOVERY time (minutes before the window),
+    not at decision time. Returns structured JSON:
+    {"direction_bias": "yes|no|neutral", "event_risk": "none|low|medium|high",
+     "confidence": 0-1, "reasons": [], "layer": str, "model": str}
+
+    Cached per market with TTL. Hot path reads cache only.
+    """
+    ticker = market_info.get("ticker", "")
+    if not ticker:
+        return None
+
+    # Check cache first
+    cached = _get_cached_verdict(ticker)
+    if cached:
+        log.debug("LLM discovery cache hit for %s", ticker)
+        return cached
+
+    # Build discovery-time prompt (no price/size - those come at decision time)
+    system_prompt = (
+        "You are a Kalshi 15-minute crypto market event-risk analyst. "
+        "The strategy posts maker limit orders on the favourite side 6-11 minutes "
+        "into a 15-minute window. You are evaluating EVENT RISK ONLY - "
+        "news, outages, exchange anomalies, regulatory events - that could "
+        "invalidate the favourite-maker thesis. "
+        "Return ONLY valid JSON with exactly these keys: "
+        "\"direction_bias\" (\"yes\"|\"no\"|\"neutral\"), "
+        "\"event_risk\" (\"none\"|\"low\"|\"medium\"|\"high\"), "
+        "\"confidence\" (number 0-1), "
+        "\"reasons\" (array of strings). "
+        "No other keys, no extra text."
+    )
+
+    user_prompt = json.dumps({
+        "ticker": ticker,
+        "event_ticker": market_info.get("event_ticker", ""),
+        "series": market_info.get("series", ""),
+        "strike": market_info.get("strike", 0),
+        "minutes_to_open": market_info.get("minutes_to_open", 0),
+        "asset": market_info.get("asset", ""),
+        "venue": "kalshi",
+    })
+
+    messages = _build_messages(system_prompt, user_prompt)
+
+    last_error = None
+    deadline = time.time() + config.LLM_EVAL_DEADLINE_SECONDS
+    layer_idx = 0
+
+    for layer in LAYERS:
+        if time.time() >= deadline:
+            log.warning(
+                "LLM discovery deadline reached - stopping after %d layers", layer_idx
+            )
+            break
+        layer_idx += 1
+        layer_name = layer["name"]
+        if _is_circuit_open(layer_name):
+            continue
+        try:
+            result = _call_layer(layer, messages, deadline)
+            if result:
+                # Transform to discovery format
+                verdict = {
+                    "direction_bias": "yes" if result["probability_of_net_profit"] > 0.5 else "no",
+                    "event_risk": "high" if result["confidence_hold_to_expiry"] < 0.3 else
+                                "medium" if result["confidence_hold_to_expiry"] < 0.5 else
+                                "low" if result["confidence_hold_to_expiry"] < 0.7 else "none",
+                    "confidence": result["confidence_hold_to_expiry"],
+                    "reasons": [result.get("reasoning", "")] if result.get("reasoning") else [],
+                    "layer": result["layer"],
+                    "model": result.get("model", "?"),
+                }
+                _record_layer_success(layer_name)
+                _cache_verdict(ticker, verdict)
+                log.info(
+                    "LLM discovery eval for %s via %s: bias=%s risk=%s conf=%.2f",
+                    ticker, verdict["layer"], verdict["direction_bias"],
+                    verdict["event_risk"], verdict["confidence"]
+                )
+                return verdict
+        except Exception as e:
+            last_error = e
+            _record_layer_failure(layer_name)
+            log.debug("Layer %s failed: %s", layer_name, e)
+            continue
+
+    log.warning("LLM discovery eval failed for %s: %s", ticker, last_error)
+    return None
+
+
+def get_cached_discovery_verdict(market_ticker: str) -> Optional[Dict[str, Any]]:
+    """Hot-path: read cached discovery verdict (sub-ms)."""
+    return _get_cached_verdict(market_ticker)
+
+
+def log_discovery_verdict_outcome(market_ticker: str, settled_yes: bool) -> None:
+    """Log verdict vs actual outcome for later scoring (T13-25 accept criteria)."""
+    cached = _discovery_cache.get(market_ticker)
+    if not cached:
+        return
+    _, verdict = cached
+    bias = verdict.get("direction_bias", "neutral")
+    risk = verdict.get("event_risk", "none")
+    correct = (bias == "yes" and settled_yes) or (bias == "no" and not settled_yes)
+    log.info(
+        "LLM discovery verdict outcome: ticker=%s bias=%s risk=%s settled_yes=%s correct=%s",
+        market_ticker, bias, risk, settled_yes, correct
+    )
 
 
 def _build_messages(system_prompt: str, user_prompt: str) -> list:
@@ -241,7 +380,7 @@ def _parse_llm_response(content: str) -> Optional[Dict[str, Any]]:
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            # 2. Fall back to extracting the first { … last } block.
+            # 2. Fall back to extracting the first { ... last } block.
             snippet = _extract_json_object(cleaned)
             if not snippet:
                 return None
@@ -252,7 +391,7 @@ def _parse_llm_response(content: str) -> Optional[Dict[str, Any]]:
         reasoning = data.get("reasoning", data.get("reason", ""))
 
         # Validate that ONLY documented keys are present. The system prompt
-        # says "exactly these keys" — extra keys indicate a malformed
+        # says "exactly these keys" - extra keys indicate a malformed
         # response that should not be trusted.
         expected_keys = {"probability_of_net_profit", "confidence_hold_to_expiry", "reasoning"}
         extra_keys = set(data.keys()) - expected_keys
@@ -269,7 +408,7 @@ def _parse_llm_response(content: str) -> Optional[Dict[str, Any]]:
             "reasoning": reasoning,
         }
     except (json.JSONDecodeError, ValueError, TypeError) as e:
-        log.debug("LLM response parse failed: %s — content: %s", e, content[:200])
+        log.debug("LLM response parse failed: %s - content: %s", e, content[:200])
         return None
 
 
@@ -361,7 +500,7 @@ def evaluate_trade(signal_info: dict) -> Optional[Dict[str, Any]]:
 
     Returns:
         dict with probability_of_net_profit, confidence_hold_to_expiry,
-        reasoning, layer, model — or None if the API call fails.
+        reasoning, layer, model - or None if the API call fails.
     """
     system_prompt = (
         "You are a disciplined Kalshi 15-minute crypto market trading analyst. "
@@ -406,7 +545,7 @@ def evaluate_trade(signal_info: dict) -> Optional[Dict[str, Any]]:
         # LLM can't blow the cycle timeout.
         if time.time() >= deadline:
             log.warning(
-                "LLM evaluation deadline (%.0fs) reached — stopping after %d completed layers",
+                "LLM evaluation deadline (%.0fs) reached - stopping after %d completed layers",
                 config.LLM_EVAL_DEADLINE_SECONDS, layer_idx,
             )
             break
@@ -434,7 +573,7 @@ def evaluate_trade(signal_info: dict) -> Optional[Dict[str, Any]]:
             log.debug("Layer %s failed: %s", layer_name, e)
             continue
 
-    log.warning("NVIDIA LLM eval failed — last error: %s", last_error)
+    log.warning("NVIDIA LLM eval failed - last error: %s", last_error)
     return None
 
 
@@ -444,14 +583,28 @@ def should_block_trade(signal_info: dict, min_probability: float = 0.65, min_con
     
     Returns (should_block: bool, eval_result: dict or None).
     Blocks if probability < min_probability OR confidence < min_confidence.
+    Also checks cached discovery-time verdict for event-risk veto (T13-25).
     """
-    
+    ticker = signal_info.get("ticker", "")
+
+    # T13-25: Hot-path cache read (sub-ms) for discovery-time event-risk veto
+    discovery = get_cached_discovery_verdict(ticker) if ticker else None
+    if discovery:
+        event_risk = discovery.get("event_risk", "none")
+        conf_disc = discovery.get("confidence", 0.0)
+        if event_risk in ("high", "medium") and conf_disc > 0.5:
+            log.info(
+                "LLM discovery VETO %s - event_risk=%s conf=%.2f layer=%s",
+                ticker, event_risk, conf_disc, discovery.get("layer", "?")
+            )
+            return True, {"veto": "discovery_event_risk", **discovery}
+
     result = evaluate_trade(signal_info)
     if not result:
         if config.LLM_EVAL_FAIL_OPEN:
-            log.warning("NVIDIA LLM eval failed — fail-open, allowing trade")
+            log.warning("NVIDIA LLM eval failed - fail-open, allowing trade")
             return False, None
-        return True, None  # Can't evaluate — block by default (fail-safe)
+        return True, None  # Can't evaluate - block by default (fail-safe)
     
     prob = result["probability_of_net_profit"]
     conf = result.get("confidence_hold_to_expiry", 0.0)
@@ -461,8 +614,8 @@ def should_block_trade(signal_info: dict, min_probability: float = 0.65, min_con
     should_block = prob < min_probability or conf < min_confidence
     if should_block:
         log.info(
-            "LLM BLOCK %s — prob=%.2f conf=%.2f (min_prob=%.2f min_conf=%.2f)",
-            signal_info.get("ticker", "?"), prob, conf,
+            "LLM BLOCK %s - prob=%.2f conf=%.2f (min_prob=%.2f min_conf=%.2f)",
+            ticker, prob, conf,
             min_probability, config.LLM_EVAL_MIN_CONFIDENCE
         )
     return should_block, result
