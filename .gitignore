@@ -98,8 +98,10 @@ data/crossvenue/
 !README.md
 !AGENTS.md
 !AGENT_TASKSv13.md
+!AGENT_TASKSv15.md
 !AUDIT_REPORT_v13.md
 !HANDOFF.md
+!docs/*.md
 SUMMARY_README
 settled_since.json
 .continuity/
