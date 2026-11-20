@@ -29,6 +29,7 @@ from pathlib import Path
 import binance_feed
 import config
 import fees
+import gbm
 
 # Lazy import for SpotComposite (event-driven WS feed)
 _spot_composite = None
@@ -235,27 +236,20 @@ def entry_fee(p: float) -> float:
     return fees.taker_fee_dollars(1.0, p) if config.GATES_FEE_TAKER else 0.0
 
 
+# Use gbm.arithmetic_cushion_z and gbm.normal_cdf instead of local implementations
+# These are kept as thin wrappers for backward compatibility with any direct imports
 def cushion_z(spot: float, strike: float, sigma: float, minutes: float,
               side: str) -> float | None:
     """Signed Brownian cushion in standard deviations, or None if undefined.
-
-    YES wins when spot > strike, so z = (spot-strike)/(sigma*sqrt(t)); NO is
-    the mirror. sigma is dollars per sqrt-minute.
+    
+    Delegates to gbm.arithmetic_cushion_z (sigma in dollars per sqrt-minute).
     """
-    if spot <= 0 or strike <= 0 or sigma <= 0:
-        return None
-    if minutes <= 0:
-        return None
-    denom = sigma * math.sqrt(minutes)
-    if denom <= 0:
-        return None
-    z = (spot - strike) / denom
-    return z if side.lower() == "yes" else -z
+    return gbm.arithmetic_cushion_z(spot, strike, sigma, minutes, side)
 
 
 def normal_cdf(z: float) -> float:
-    """Standard normal CDF via math.erf."""
-    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    """Standard normal CDF via math.erf. Delegates to gbm.normal_cdf."""
+    return gbm.normal_cdf(z)
 
 
 # ═════════════════════════════════════════════════════════════════════

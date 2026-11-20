@@ -33,6 +33,7 @@ from typing import AsyncIterator, Dict, List, Optional
 import time
 
 import requests
+import gbm
 
 log = logging.getLogger("binance_feed")
 
@@ -365,14 +366,10 @@ def prob_above(spot: float, strike: float, sigma_min: float, minutes_left: float
     This is the spot-implied fair value we compare both venues against. Near
     expiry the lognormal is a poor description of a single print, so treat the
     result as a reference, not a truth.
+    
+    Delegates to gbm.gbm_probability_point for unified GBM implementation.
     """
-    if spot <= 0 or strike <= 0 or sigma_min <= 0 or minutes_left <= 0:
-        return float("nan")
-    denom = sigma_min * math.sqrt(minutes_left)
-    if denom <= 0:
-        return 1.0 if spot > strike else 0.0
-    d2 = (math.log(spot / strike) - 0.5 * denom * denom) / denom
-    return 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0)))
+    return gbm.gbm_probability_point(spot, strike, sigma_min, minutes_left)
 
 
 async def stream_trades(symbol: str = "btcusdt") -> AsyncIterator[float]:

@@ -22,6 +22,7 @@ Only trade when: model_probability > ask_price_dollars + fee + MIN_EDGE_CENTS
 import math
 import logging
 import config
+import gbm
 from statistics import NormalDist
 
 log = logging.getLogger(__name__)
@@ -50,25 +51,10 @@ def gbm_probability_yes_wins(spot_price: float, strike: float,
         risk_free_rate: annualized risk-free rate (5% default)
 
     Returns probability in [0, 1].
+    
+    Delegates to gbm.gbm_probability_bs_d2 for unified GBM implementation.
     """
-    if minutes_left <= 0:
-        return 1.0 if spot_price >= strike else 0.0
-    if spot_price <= 0 or strike <= 0:
-        return 0.5
-
-    T = minutes_left / (365.0 * 24.0 * 60.0)  # years
-    sigma = volatility_annualized
-    if T <= 0 or sigma <= 0:
-        return 1.0 if spot_price >= strike else 0.0
-
-    try:
-        d2 = (math.log(spot_price / strike) +
-              (risk_free_rate - 0.5 * sigma * sigma) * T) / \
-             (sigma * math.sqrt(T))
-        prob = _NORMAL.cdf(d2)
-        return max(0.001, min(0.999, prob))
-    except (ValueError, OverflowError):
-        return 0.5
+    return gbm.gbm_probability_bs_d2(spot_price, strike, volatility_annualized, minutes_left, risk_free_rate)
 
 
 def momentum_adjusted_probability(mid_yes_cents: float,
