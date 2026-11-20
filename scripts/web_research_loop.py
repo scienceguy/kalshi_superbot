@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mempalace_bridge import get_bridge
 
 AGENT_IDENTITY = "ubuntu:opencode:home"
-STREAM = "project/kalshi_superbot"
+STREAM = "project/home"
 ROOM = "web-research"
 TOPIC = "10min-loop"
 
@@ -55,8 +55,8 @@ def search_and_post(query: str, label: str):
     # Post the search query as a log event
     bridge.logstream_append(
         event_type="status",
-        stream="project/home",
-        room="web-research",
+        stream=STREAM,
+        room=ROOM,
         to_agent="*",
         body=f"Web research started: {label} | query={query[:100]}",
         metadata={"web_research": True, "label": label, "query": query}
@@ -94,6 +94,15 @@ def run_research_cycle():
     ]
     
     bridge = get_bridge()
+    
+    # Store the query list as a research note
+    query_list = "\n".join([f"- {q[1]}: {q[0]}" for q in queries])
+    bridge.artifact_put(
+        kind="note",
+        content=f"# Web Research Queries - {datetime.now(timezone.utc).isoformat()}\n\n{query_list}",
+        created_by=AGENT_IDENTITY,
+        metadata={"type": "research_queries", "source_file": "scripts/web_research_loop.py"}
+    )
     
     for query, label in queries:
         search_and_post(query, label)

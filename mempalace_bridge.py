@@ -185,12 +185,13 @@ class MemPalaceBridge:
 
     def artifact_put(
         self,
-        artifact_id: str,
+        kind: str,
         content: str,
+        created_by: str = None,
         metadata: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """Store an artifact (e.g., patch, checkpoint)."""
-        args = ["artifact", "put", "--id", artifact_id, "--content", content]
+        args = ["artifact", "put", "--kind", kind, "--created-by", created_by or self._agent_identity, "--content", content]
         if metadata:
             args.extend(["--metadata", json.dumps(metadata)])
         return self._run_cmd(args)
@@ -228,8 +229,9 @@ class MemPalaceBridge:
             meta["model_version"] = model_version
 
         return self.artifact_put(
-            artifact_id=f"checkpoint_{checkpoint_id}",
+            kind="json",
             content=json.dumps(payload),
+            created_by=self._agent_identity,
             metadata=meta,
         )
 
