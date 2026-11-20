@@ -34,7 +34,7 @@ class BoxLeg:
     """One leg of a box arbitrage."""
     venue: str           # "kalshi" or "polymarket"
     side: str            # "YES" or "NO"
-    price_cents: int     # Ask price in cents (what we pay)
+    price_cents: int     # Ask price (what we pay); 10000 units = $1.00
     size: int            # Available size at ask
     ticker: str          # Market ticker
     market_type: str     # "box" or "directional"
@@ -87,27 +87,36 @@ class BoxArbitrageEngine:
         self.opportunities_log: List[BoxOpportunity] = []
         self.executions_log: List[BoxExecution] = []
     
-    def calculate_fees(self, price_cents: int, size: int, venue: str) -> int:
-        """Calculate fees for an order in cents."""
-        price_dollars = price_cents / 100.0
-        notional = price_dollars * size
-        
+    def calculate_fees(self, price_cents: int, size: int, venue: str, taker: bool = True) -> int:
+        """Fee for one leg, in this module's unit (10000 = $1.00).
+
+        Fee models are the published quadratic schedules, not a flat
+        percentage of notional:
+          Kalshi          round up(M x 0.07 x C x P x (1-P)), M=1 for KX*15M
+          Polymarket US   round up(Theta x C x P x (1-P)), Theta=0.095 at Tier 1
+        Maker legs pay nothing on either venue (Kalshi maker multiplier 0;
+        Polymarket US Tier 1 has no maker rebate).
+        """
+        if not taker:
+            return 0
+
+        price_dollars = price_cents / 10000.0
+
         if venue == "kalshi":
-            # Kalshi taker fee
-            fee_rate = config.KALSHI_FEE_RATE if hasattr(config, 'KALSHI_FEE_RATE') else 0.07
-            fee_dollars = notional * fee_rate
+            fee_dollars = fees.taker_fee_dollars(size, price_dollars)
         elif venue == "polymarket":
-            # Polymarket fee (rounded per order)
-            # Using fees.py _taker_fee if available
             try:
-                from fees import _taker_fee
-                fee_dollars = _taker_fee(notional)
-            except ImportError:
-                fee_dollars = notional * 0.02  # 2% fallback
+                from polymarket_us_client import taker_fee_dollars as poly_fee
+            except ImportError:  # pragma: no cover - module ships with the repo
+                poly_fee = None
+            if poly_fee is not None:
+                fee_dollars = poly_fee(size, price_dollars)
+            else:
+                fee_dollars = 0.095 * size * price_dollars * (1.0 - price_dollars)
         else:
-            fee_dollars = notional * 0.02
-        
-        return int(round(fee_dollars * 100))  # cents
+            fee_dollars = 0.02 * size * price_dollars
+
+        return int(math.ceil(fee_dollars * 10000 - 1e-9))
     
     def estimate_slippage(self, price_cents: int, size: int, available_size: int) -> int:
         """Estimate slippage in cents based on size relative to available liquidity."""
@@ -155,12 +164,13 @@ class BoxArbitrageEngine:
             return False, 0.0
     
     def detect_same_venue_box(self, yes_ask: int, yes_size: int, no_ask: int, no_size: int,
-                               kalshi_ticker: str, min_size: int = None) -> Optional[BoxOpportunity]:
+                               kalshi_ticker: str, min_size: int = None,
+                               venue: str = "kalshi", taker: bool = True) -> Optional[BoxOpportunity]:
         """
-        Detect same-venue box on Kalshi.
-        
-        Kalshi YES and NO prices should sum to ~100c (minus spread).
-        If yes_ask + no_ask + fees < 100c, there's a risk-free profit.
+        Detect same-venue box (YES + NO of the same market).
+
+        Prices are in this module's unit (10000 = $1.00). If
+        yes_ask + no_ask + fees < 10000, both legs pay $1.00 between them.
         """
         min_size = min_size or self.min_size
         
@@ -169,8 +179,8 @@ class BoxArbitrageEngine:
             return None
         
         # Calculate fees
-        yes_fee = self.calculate_fees(yes_ask, min_size, "kalshi")
-        no_fee = self.calculate_fees(no_ask, min_size, "kalshi")
+        yes_fee = self.calculate_fees(yes_ask, min_size, venue, taker)
+        no_fee = self.calculate_fees(no_ask, min_size, venue, taker)
         total_fees = yes_fee + no_fee
         
         # Estimate slippage
@@ -181,12 +191,12 @@ class BoxArbitrageEngine:
         # Total cost
         total_cost = yes_ask + no_ask
         net_cost = total_cost + total_fees + total_slippage
-        edge = 10000 - net_cost  # 10000 cents = $1.00
+        edge = 10000 - net_cost  # 10000 units = $1.00
         
         if edge <= 0:
             return None
         
-        edge_bps = edge * 10000 / 10000  # bps relative to $1
+        edge_bps = float(edge)  # 1 unit = 1 bp of $1.00
         
         if edge_bps < self.min_edge_bps:
             return None
@@ -217,11 +227,15 @@ class BoxArbitrageEngine:
     
     def detect_cross_venue_box(self, yes_ask_a: int, yes_size_a: int, venue_a: str, ticker_a: str,
                                 no_ask_b: int, no_size_b: int, venue_b: str, ticker_b: str,
-                                min_size: int = None) -> Optional[BoxOpportunity]:
+                                min_size: int = None,
+                                equivalence_proven: Optional[bool] = None) -> Optional[BoxOpportunity]:
         """
         Detect cross-venue box.
-        
-        Requires: settlement equivalence proven (T13-11)
+
+        ``equivalence_proven`` overrides the T13-11 basis check when the two
+        contracts are settlement-equivalent by construction (e.g. Kalshi and
+        Polymarket US 15m Up/Down windows both resolve on the CF Benchmarks
+        60-second average with an at-or-above tie rule).
         """
         min_size = min_size or self.min_size
         
@@ -230,7 +244,10 @@ class BoxArbitrageEngine:
             return None
         
         # Check settlement equivalence
-        equivalent, basis_diff = self.check_settlement_equivalence(ticker_a, ticker_b)
+        if equivalence_proven is None:
+            equivalent, basis_diff = self.check_settlement_equivalence(ticker_a, ticker_b)
+        else:
+            equivalent, basis_diff = bool(equivalence_proven), 0.0
         
         tagged_as = "box" if equivalent else "directional"
         
@@ -256,7 +273,7 @@ class BoxArbitrageEngine:
         if edge <= 0:
             return None
         
-        edge_bps = edge * 10000 / 10000
+        edge_bps = float(edge)  # 1 unit = 1 bp of $1.00
         
         if edge_bps < self.min_edge_bps:
             return None
