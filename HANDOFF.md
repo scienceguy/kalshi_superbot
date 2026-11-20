@@ -1,106 +1,117 @@
 # HANDOFF
 
-Updated 2026-11-20 after completing T13-01 through T13-05.
+Updated 2026-11-20 after completing v15 Phase 0 (T15-00 through T15-05) + cross-sectional arbitrage stack.
 
 ## Verified State
 
 ```
 python -m pytest tests/ -q
--> 254 passed in 10.89s
+-> 340 passed in 10.32s
 
-git log --oneline -5
--> a81cb5a T13-05: Single source of truth - SQLite WAL owns positions/orders/fills/ledger
--> ad33135 T13-04: No-drop ledger - bounded webhook queue with spill to durable WAL
--> c2dec50 T13-03: Equity-scaled risk limits - replace dollar caps with fractions of start-of-day equity
--> 26a0d44 T13-01: Fix two failing tests - n8n client API key load and hedge contract fractions
--> 304d8f8 Must fix: gates.py - floor q on the YES-equivalent price; NO was credited a YES win rate
+git log --oneline -10
+-> 96b8bcd T15-24/T15-25: xsec_arb_scan.py + tests
+-> 2e3d12e T15-23: fees.py fix fudge factor causing 1-unit fee error at exact boundaries
+-> 5d911c1 T15-22: box_arbitrage.py fix fee model, units, equivalence override
+-> 7b6003d T15-21: polymarket_us_client.py new module for Polymarket US public API
+-> dfb0652 T15-20: kalshi_client.py public read-only mode
+-> 1baeaca T15-00/T15-01/T15-02: Phase 0 re-verification on HEAD f47919f
+-> f47919f (origin/main) peer pushed during session
 ```
 
-All 254 tests pass. Tree is clean.
+All 340 tests pass. Tree is clean on branch `v15-task-list`.
 
-## Completed Tasks (from AGENT_TASKSv13.md)
+## Completed v15 Tasks
 
-### T13-01: Public-repo secret sweep ✅
-- Removed `logs/` from git tracking, added to `.gitignore`
-- gitleaks/trufflehog scan found 5 historical private key patterns (pre-2026-11-01 rewrite)
-- All secrets should be considered rotated
+### T15-00/T15-01/T15-02: Phase 0 Re-verification on HEAD f47919f ✅
+- `python3 -m pytest tests/ -q` → **314 passed** at start, **340 passed** now (26 new tests)
+- Inventory: `docs/FILES_f47919f.txt` (146 files)
+- Committed `docs/PHASE0_STATUS.md` with F-01..F-16 and C-a..C-g verdicts + command output
+- New findings F-17..F-21 documented
+- `gitleaks detect` → 5 `private-key` hits, all documentation false positives
+- `git log -S VERTEX_PROJECT_ID` → empty
 
-### T13-02: NO-side floor fix ✅
-- Commit 304d8f8 verified - all 22 gate tests pass
-- Gates now floor on YES-equivalent price for both sides
+### T15-03: Sigma Calibration ✅
+- `scripts/measure_sigma.py` measured ATR*sqrt(pi/2) overestimates realized close-to-close sigma by 61-78% (mean ratio 1.70)
+- Correct multiplier ≈ 0.738 (sigma ≈ ATR * 0.738)
+- Implemented in `gates.py:367-372` — replaced `ATR * math.sqrt(math.pi/2)` with `ATR * 0.738`
+- Verified: `measure_sigma.py` with 0.738 gives ratio ~0.98 (near 1.0)
 
-### T13-03: Equity-scaled risk limits ✅
-- Added `MAX_TRADE_PCT_OF_EQUITY` (5%), `MIN_CASH_PCT_OF_EQUITY` (0.5%), `PAPER_MIN_CASH_PCT_OF_EQUITY` (0.1%) to config.py
-- Updated risk.py to use equity-scaled caps with legacy dollar fallback
+### T15-04: Config Consistency ✅
+- Created `tests/test_config_consistency.py` (6 tests)
+- Stale 15-55c / 6-11min comments in `config.py` updated to reflect live defaults:
+  - Entry window: 4-14 min (was 6-11)
+  - Entry band: 95-99c (was 15-55c)
+  - MIN_YES_PRICE_CENTS=75
+  - GATES_HIGH_GAMMA_MINUTES=2.0
+  - MAX_CONTRACTS_CAP=3
 
-### T13-04: No-drop ledger ✅
-- Bounded webhook queue (maxsize=1000) with spill to `/tmp/n8n_webhook_spill.jsonl`
-- Background worker replays every 30s
-- Thread-safe spill/replay with locks
+### T15-05: Docs Refresh ✅
+- `README.md` rewritten: current architecture, cross-sectional arb, live defaults
+- `AGENTS.md` updated: v15 paths, 340 tests, ubuntu:opencode:home identity, live defaults table
+- `HANDOFF.md` updated (this file)
 
-### T13-05: Single source of truth ✅
-- Added `dry_state`, `settlement_queue`, `settled_markets` tables to local_db.py
-- trader.py updated to use local_db methods instead of JSON files
-- Test mocks updated to patch local_db methods
+### Cross-Sectional Arbitrage Stack (T15-20..25) ✅
+
+| Commit | File | Change |
+|--------|------|--------|
+| `dfb0652` | `kalshi_client.py` | `require_key=False` public read mode; `_PUBLIC_PREFIXES` guard |
+| `7b6003d` | `polymarket_us_client.py` | New module: dual-host (gateway + `api.polymarket.us`), quadratic fee model (Θ=0.095), executable book quotes |
+| `5d911c1` | `box_arbitrage.py` | Real quadratic fees (Kalshi 0.07, PolyUS 0.095); units=10000=$1; `equivalence_proven` override |
+| `2e3d12e` | `fees.py` | Fixed 1e-12 fudge factor that pushed exact boundaries up by 1 unit |
+| `96b8bcd` | `scripts/xsec_arb_scan.py` + tests | Live scanner matching on `close_time==window_end`; UTC timestamps; 20 new tests |
+
+**Verified live:**
+- Settlement equivalence: Kalshi KX*15M and Polymarket US cpc-*-updown-15m-* both settle on CF Benchmarks BRTI 60s simple average with `>=` tie rule
+- Fee math: Kalshi round_up(1×0.07×C×P×(1-P)); PolyUS round_up(0.095×C×P×(1-P)) to cent; maker=0 both venues
+- Scanner: reads executable quotes with real depth from `api.polymarket.us/v1/markets/{slug}/book` (bypasses gateway Cloudflare 1015); logs to `logs/xsec_arb.jsonl`
+- Edge: 1-2 bps maker/maker after fees (matches published 4.13c drag at 50c)
 
 ## Infrastructure Running
 
-- **Continuous collaboration loop**: PID 65746, heartbeats every 60s, cycle checks every 120s
-- **MemPalace logstream watcher**: PID 65923, monitoring task.request/reply/patch.ready
-- **n8n**: 5 active SuperBot workflows (Trade, Data Collect, Backtest, Critical Alert, Monitor)
-- **Inference endpoints verified**: Petals wrapper (11434), FreeLLMAPI (3001), NVIDIA Direct
-- **Agent identity**: `ubuntu:opencode:home` (all sessions share ONE identity)
+- **n8n**: `http://127.0.0.1:5678` — 4 workflows managed via `n8n/workflows/*.json` + `scripts/import_n8n_workflows.py`
+- **MemPalace**: palace at `/home/ubuntu/.mempalace`, wing `ubuntu` — agent identity `ubuntu:opencode:home`
+- **Secrets**: `~/.secrets/` has `kalshi_private.pem`, `n8n_api_key`, `supabase_service_key`, `superbot_webhook_secret`, `bw/`
+- **Inference**: `openrouter-free` provider (primary), `dsh-our-free-model` gateway at `http://127.0.0.1:18900`
 
-## Pending Tasks
+## Pending v15 Tasks
 
-### T13-06: Refresh docs (README, regenerate HANDOFF.md) ✅
-- README rewritten with current architecture, parameters, data flow
-- This HANDOFF.md updated
+### Phase 1 Data Plane (T15-10..13) ⏳
+- T15-10: Event-driven spot snapshot (Binance WS + Coinbase WS)
+- T15-11: BRTI tracker (CF Benchmarks BRTI 60s avg replication)
+- T15-12: Venue books + book-age gate (orderbook freshness < 2s)
+- T15-13: Backtest data capture (tick-store for cross-venue replay)
 
-### T13-07: Run in-session ponytail-audit ⏳
-- Need to run ponytail-audit skill on the full codebase
+### Phase 2 Strategy (T15-20..25) ✅ DONE
+- T15-20: Kalshi public mode (keyless market data)
+- T15-21: Polymarket US public client
+- T15-22: Box engine fix (fees, units, equivalence)
+- T15-23: Fees fudge fix
+- T15-24: Cross-sectional arb scanner
+- T15-25: Tests for arb stack
 
-### Phase B: Polymarket US Integration (T13-10..12) ⏳
-- T13-10: Polymarket US client (REST + WS)
-- T13-11: Polymarket US fee model + order math
-- T13-12: Unified signal engine (Kalshi + Polymarket)
-
-### Phase D: Harness (T13-30, 32) ⏳
-- T13-30: MemPalace single-owner service + bridge
-- T13-32: n8n workflow import/export CLI (not direct DB writes)
-
-### Phase C: Forecaster (T13-20..25) ⏳
-- T13-20: GBM fair value + LLM eval
-- T13-21: ML model training (off hot path)
-- T13-22: KL divergence + box arbitrage
-- T13-23: Fair value comparison engine
-- T13-24: Nightly backtest + forecast
-- T13-25: 14-day forecast from multiple model families
-
-### Phase D: Forecaster continued (T13-31) ⏳
-
-### Phase E: Promotion Gates (T13-33, 34) ⏳
-
-### Phase F: Parallel execution (T13-40..46) ⏳
-
-### Phase G: Moonshot reporting (T13-50) ⏳
+### Phase 3 Gates & Risk (T15-30..35) ⏳
+- T15-30: Time-decay cushion with corrected sigma (DONE in T15-03)
+- T15-31: High-gamma zone with live calibration
+- T15-32: Measured floor re-verification (YES-equivalent only)
+- T15-33: Risk limits audit (equity-scaled, per-market loss)
+- T15-34: Latency regression gate (P95 < 100ms)
+- T15-35: KL-divergence + box arb integration
 
 ## Known Issues / Blockers
 
-1. **Peer agents not replying**: kalshi_deepbot, kalshi_trader have not replied to 10+ task.requests
-2. **Need from operator**:
-   - Real venue balances (Q1)
-   - Risk profile fractions (Q3)
-3. **KwaaiNet disabled**: Using Petals wrapper (11434), FreeLLMAPI (3001), NVIDIA Direct for inference
+1. **Live Kalshi credentials**: no `KALSHI_KEY_ID` configured; `KALSHI_CONFIRM_LIVE=true` not supplied (operator-only)
+2. **Polymarket US authenticated API**: no credentials on this host (`~/.secrets/` has only bw/, kalshi_private.pem, n8n_api_key, supabase_service_key, superbot_webhook_secret) → account-level fee tier and authenticated order path unverified
+3. **Polymarket US gateway rate-limits bursts** (Cloudflare 1015 / HTTP 429) → depth fetches need backoff/low request rate (using `api.polymarket.us` as workaround)
+4. **Peer agents**: `ubuntu:service:kalshi_trader` has not replied to money-path review request (evt_20261120T105934)
 
 ## Moonshot Framing (Honest)
 
-The $6.25M moonshot requires ~87%/day from $1000, ~58%/day from $10000 - probability effectively zero per honest framing. Treated as reporting target with honest probability bounds.
+The $3.25M moonshot is a reporting/forecast target, never a sizing/risk input. Probability effectively zero per honest framing. Treated as upper bound only.
 
 Promotion path: paper → micro-live → scaled, gated on settled-market counts and positive clustered lower bound.
 
 ## Git Workflow
 
-Each task = one commit with T13-xx prefix, revertible alone. No secrets in repo, logs, MemPalace, or n8n workflows. Live trading behind explicit confirm flags (KALSHI_CONFIRM_LIVE=true).
+Each task = one commit with T15-xx prefix, revertible alone. No secrets in repo, logs, MemPalace, or n8n workflows. Live trading behind explicit confirm flags (`KALSHI_CONFIRM_LIVE=true`).
 
-Search MemPalace KG before changing constants; write back with supersede.
+Branch `v15-task-list` pushed to origin. Search MemPalace KG before changing constants; write back with supersede.

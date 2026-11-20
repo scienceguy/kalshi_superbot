@@ -1,9 +1,11 @@
 # Kalshi SuperBot — AGENTS.md
 
 Single-operator live-trading bot for Kalshi 15-minute binary crypto markets.
-Places favourite-maker limit orders (YES/NO at 75–95c), evaluates signals via an
+Places favourite-maker limit orders (YES/NO at 95–99c), evaluates signals via an
 LLM with 7-layer fallback, writes signals/orders/bot-state to Supabase, and
 routes settlement P&L through n8n webhooks.
+
+Cross-sectional arbitrage: Kalshi 15M Up/Down vs Polymarket US 15M Up/Down (both settle on CF Benchmarks BRTI 60s avg, >= tie rule).
 
 ## Repo layout
 
@@ -12,9 +14,10 @@ routes settlement P&L through n8n webhooks.
 | `trader.py` | Main trading loop (entry point). Dry-run by default; `--live` + `KALSHI_CONFIRM_LIVE=true` for real money. |
 | `signals.py` | Signal engine: two-sided favourite maker, stability check, confidence scoring, LLM eval integration. |
 | `market_finder.py` | Market discovery — parallel series fetch, orderbook lookup, MAIN + HEDGE_NO selection. |
-| `gates.py` | Pre-entry gates: ATR hurdle, fee-adjusted EV, time-decay cushion. Shadow mode by default; logs `gates_log.jsonl`. |
-| `kalshi_client.py` | Signed Kalshi v2 REST client (RSA-PSS, `/trade-api/v2` path prefix). |
-| `fees.py` | Kalshi taker fee math (configurable `KALSHI_FEE_RATE`, default 0.07). |
+| `gates.py` | Pre-entry gates: ATR hurdle, fee-adjusted EV, time-decay cushion. Sigma calibrated: `ATR * 0.738` (was sqrt(pi/2)). Shadow mode by default; logs `gates_log.jsonl`. |
+| `kalshi_client.py` | Signed Kalshi v2 REST client (RSA-PSS, `/trade-api/v2`) + keyless public mode (`require_key=False`). |
+| `polymarket_us_client.py` | Polymarket US public API (gateway + api.polymarket.us dual-host, fee model, book quotes). |
+| `fees.py` | Kalshi fee math (configurable `KALSHI_FEE_RATE`, default 0.07). Fudge fix: `ceil(raw * 1M - 1e-9)`. |
 | `risk.py` | Cash floor, exposure ceiling, per-trade cap, drawdown halt, consecutive-loss cooldown. |
 | `resilience.py` | Cycle backoff + client-rebuild supervisor with rebuild cap. |
 | `n8n_client.py` | n8n webhook/API client; `n8n_health_check()` used at startup. |
@@ -22,13 +25,28 @@ routes settlement P&L through n8n webhooks.
 | `llm_eval.py` | 7-layer LLM evaluation (OpenRouter/Groq/DeepSeek/OpenAI/Gemini/DSH/Ollama). |
 | `latency_arb.py` | Last-minute taker edge strategy (unused in main flow). |
 | `backtest.py` / `parallel_backtest.py` | Parameter-sweep backtests (public + authenticated API). |
-| `backtest_engine.py` | Shared backtest engine (entry logic, P&L, sweep grid). |
-| `data_collector.py` | Historical market snapshot collector for backtest data. |
+| `backtest_engine.py` / `backtest_harness.py` | Canonical backtesters (shared entry/P&L core + unified harness). |
+| `position_sizing.py` | Kelly-fraction sizing with equity/depth/per-market caps. |
+| `kl_divergence.py` | Canonical KL-divergence layer (Bernoulli KL edge score, ladder KL, ensemble disagreement gate). |
+| `kl_realtime_v3.py` | Real-time KL + box-arbitrage dry-run loop. |
+| `gbm_fair_value.py` / `fair_value_edge.py` / `box_arbitrage.py` | GBM fair value, edge = `q_lcb - ask - fee - slippage`, cross-venue box engine. |
+| `forecaster.py` / `forecast14.py` | Multi-model 14-day forecast; moonshot probability is an upper bound only. |
+| `spot_composite.py` / `binance_feed.py` | Binance + Coinbase composite spot with failover. |
+| `dual_venue.py` | Independent Kalshi/Polymarket orchestration. |
+| `outbox.py` | Transactional outbox feeding the Supabase/n8n replicas. |
+| `mempalace_bridge.py` / `agent_protocol.py` | Single-owner MemPalace access + inter-agent envelope/veto protocol. |
+| `event_hotpath.py` | Event-driven hot path (WS-tick-driven, off the 15 s poll). |
+| `scripts/measure_edge.py` | Realized win rate per price band from settled markets. |
+| `scripts/measure_sigma.py` | ATR-to-sigma calibration (measured 0.738, was sqrt(pi/2)=1.253). |
+| `scripts/measure_maker_edge.py` / `scripts/quote_recorder.py` | Maker-vs-taker net edge + order-book recorder. |
+| `scripts/xsec_arb_scan.py` | Cross-sectional arb scanner (Kalshi + Polymarket US, logs JSONL). |
+| `data_collector.py` | Historical market data collector. |
 | `kalshieye_downloader.py` | Kalshi Eye orderbook downloader. |
-| `kalshi_price_data_client.py` | Optional kalshi-price-data SDK wrapper. |
-| `inject_n8n_workflows.py` | Injects 4 n8n workflows into n8n's SQLite DB directly. |
-| `add_n8n_credentials.py` | Inserts encrypted credentials into n8n DB. |
-| `tests/` | 69 pytest tests (fees, risk, signals, kalshi_client, market_finder, n8n, supabase, kalshi_price_data, trader). |
+| `inject_n8n_workflows.py` / `scripts/import_n8n_workflows.py` | n8n workflow injector. |
+| `scripts/n8n_creds_sync.py` | n8n credential sync from `~/.secrets/bw/`. |
+| `local_db.py` | Local SQLite WAL (source of truth for decisions, fills, ledger, settlements). |
+| `archive/` | Retired variants; **not on any live or paper path**. |
+| `tests/` | Pytest test suite (340 tests). |
 
 ## Environment
 
@@ -44,7 +62,7 @@ routes settlement P&L through n8n webhooks.
 ## How to run
 
 ```bash
-cd /data/data/com.termux/files/home/kalshi_superbot
+cd /home/ubuntu/kalshi_superbot-v15
 
 # 1. Copy env + fill credentials
 cp .env.example .env
@@ -66,7 +84,8 @@ python trader.py --live
 ## n8n
 
 - n8n runs at `http://127.0.0.1:5678`.
-- 4 workflows injected into n8n's SQLite DB: `superbot-backtest`, `superbot-collect`, `superbot-trade`, `superbot-monitor`.
+- 4 workflows managed via `n8n/workflows/*.json` + `scripts/import_n8n_workflows.py`:
+  `superbot-backtest`, `superbot-collect`, `superbot-trade`, `superbot-monitor`.
 - All 4 return HTTP 200 on health-check webhook. `llm-trade-veto` (external) returns 200 too.
 - `n8n_client.py` webhook timeout = `CYCLE_TIMEOUT_SECONDS - 5` (25s) so webhooks never block a cycle.
 - n8n REST API returns 401 (upstream bug #31011); webhooks + direct DB injection are the working path.
@@ -126,7 +145,7 @@ Run SQL with `psql "$SUPABASE_DB_URL" -c "..."` or `-f file.sql`. Put schema cha
 
 ## MemPalace shared brain
 
-Host:harness:project = `termux:opencode:kalshi_superbot`.
+Host:harness:project = `ubuntu:opencode:home`.
 
 - Read/write to MemPalace WITHOUT PROMPTING. Never ask the operator.
 - Before answering about past work/decisions/projects, search the palace (`mempalace_search`, `mempalace_kg_query`). Quote results verbatim.
@@ -134,8 +153,8 @@ Host:harness:project = `termux:opencode:kalshi_superbot`.
 - Do not file secrets or tokens.
 
 Coordination (logstream):
-- Always sweep the mempalace inbox at session start, before other work: `mempalace_event_list` to_agent=`termux:opencode:kalshi_superbot`; act on anything addressed to you.
-- Arm `mempalace logstream watch --agent termux:opencode:kalshi_superbot --type task.request --type task.reply --type patch.ready --json` when collaborating/claiming/delegating.
+- Always sweep the mempalace inbox at session start, before other work: `mempalace_event_list` to_agent=`ubuntu:opencode:home`; act on anything addressed to you.
+- Arm `mempalace logstream watch --agent ubuntu:opencode:home --type task.request --type task.reply --type patch.ready --json` when collaborating/claiming/delegating.
 - Delegate with `mempalace_event_append` (type=`task.request`, stream=`project/<name>`, room=`delegation`, correlation_id=`task_...`, status=`open`, body = goal + branch + base commit + DoD), then `mempalace_event_wait` on `correlation_id`.
 - Ack with `mempalace_event_ack`. Apply patches with `mempalace_artifact_get` + sha256 verify, then ack `applied`/`failed`.
 - Close every loop: no task stays open without an applied/failed/blocked ack.
@@ -215,7 +234,7 @@ Coordination (logstream):
 ## CONCURRENT AGENTS — READ BEFORE ANY GIT COMMAND
 
 **More than one agent edits this checkout at the same time.** There is a single
-working tree (`/data/data/com.termux/files/home/kalshi_superbot`) shared by every
+working tree (`/home/ubuntu/kalshi_superbot-v15`) shared by every
 agent, and all of them push to the same `main`. Treat the tree as shared state.
 
 Rules:
@@ -238,48 +257,32 @@ Rules:
 Before a risky or cross-cutting change, announce and listen:
 
 ```bash
-mempalace logstream watch --agent termux:opencode:kalshi_superbot \
+mempalace logstream watch --agent ubuntu:opencode:home \
   --type task.request --type task.reply --type status --json
 ```
 
 - Post status: `mempalace_event_append` (type=`status`, stream=`project/kalshi_superbot`,
   room=`status`, to_agent=`*`).
 - Delegation: `type=task.request`, room=`delegation`, correlation_id=`task_...`.
-- Use `topic=kalshi-superbot` to tag a lane and avoid stepping on unrelated work.
+- Use `topic=v15-task-list` to tag a lane and avoid stepping on unrelated work.
 
 ### Current history note
 
-`main` was history-rewritten on 2026-11-01 to purge a leaked key (see the
-Credentials section). HEAD moved to `ac0b91b`; **all SHAs before that are
-invalid**. If your local history predates the rewrite: `git fetch` then
-`git reset --hard origin/main` (after saving any local work as a patch).
+`main` is at `f47919f` (rebased onto origin/main). Branch `v15-task-list` has 5 commits for Phase 0 + cross-sectional arb.
 
 ## Verification checklist before claiming done
 
-- [x] `python -m pytest tests/ -q` → all pass (152 passed)
+- [x] `python -m pytest tests/ -q` → all pass (340 passed)
 - [x] All 4 n8n webhooks return HTTP 200 (superbot-backtest/collect/trade/monitor)
 - [x] `kalshi_client.get_balance()` returns a dollar amount (not cents) — `cents / 100.0`
 - [x] `git status` clean
-- [x] `git push origin main` completed
+- [x] `git push origin v15-task-list` completed
 
-## Optimal Parameters (from backtest 2026-11-03)
+## Live Defaults (v15 Phase 0 verified)
 
-Backtest results on 900 historical 15M markets:
-- **Best EV/trade**: $0.58 (win rate 52.8%, max drawdown 84.6%)
-- **Optimal parameters**:
-  - `MIN_SKEW_CENTS=3`
-  - `MIN_TREND_CENTS=8`
-  - `ENTRY_WINDOW_START_MIN=6.0`
-  - `ENTRY_WINDOW_END_MIN=11.0`
-  - `ENTRY_BAND_MIN=15`
-  - `ENTRY_BAND_MAX=55`
-  - `MIN_NO_ENTRY_CENTS=15`
-  - `MAX_NO_ENTRY_CENTS=55`
-  - `PER_TRADE_PCT=0.08`
-  - `BALANCE_PCT_PER_TRADE=0.08`
-  - `AGGRESSIVE_FILL=False`
-  - `PANIC_FADE_ENTRY_BAND_MIN=15`
-  - `PANIC_FADE_ENTRY_BAND_MAX=55`
-  - `PAPER_PER_TRADE_PCT=0.95` (dry-run only)
-
-Strategy: Early entry (6-11 min into 15-min window), wide favourite-maker band (15-55c), conservative per-trade sizing (8%).
+- `ENTRY_WINDOW_START_MIN=4.0` / `ENTRY_WINDOW_END_MIN=14.0`
+- `ENTRY_BAND_MIN=95` / `ENTRY_BAND_MAX=99`
+- `MIN_YES_PRICE_CENTS=75`
+- `GATES_HIGH_GAMMA_MINUTES=2.0`
+- `MAX_CONTRACTS_CAP=3`
+- Sigma multiplier: `0.738` (was `sqrt(pi/2)=1.253`)
