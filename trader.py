@@ -180,7 +180,6 @@ async def _execute_cross_venue_arb(client: KalshiClient, opportunities: list) ->
             )
             
             # Execute with leg-risk management
-            import asyncio
             result = await leg_risk.execute_arb(arb)
             
             if result.status == leg_risk.ArbStatus.COMPLETE:
@@ -195,6 +194,53 @@ async def _execute_cross_venue_arb(client: KalshiClient, opportunities: list) ->
             log.error(f"Failed to execute cross-venue arb: {e}")
     
     return executed
+
+
+def _get_box_scanner():
+    """Lazy-load box scanner (same-venue cross-sectional arb)."""
+    global _box_scanner
+    if _box_scanner is None:
+        try:
+            import box_scanner
+            _box_scanner = box_scanner.BoxScanner(
+                check_interval_seconds=config.BOX_SCANNER_INTERVAL_SECONDS if hasattr(config, 'BOX_SCANNER_INTERVAL_SECONDS') else 60.0,
+                min_edge_cents=config.BOX_SCANNER_MIN_EDGE_CENTS if hasattr(config, 'BOX_SCANNER_MIN_EDGE_CENTS') else 0.5,
+                min_liquidity=config.BOX_SCANNER_MIN_LIQUIDITY if hasattr(config, 'BOX_SCANNER_MIN_LIQUIDITY') else 10,
+            )
+            log.info("BoxScanner initialized")
+        except Exception as e:
+            log.warning("Failed to load box_scanner: %s", e)
+    return _box_scanner
+
+
+def _scan_box_spreads(client: KalshiClient) -> int:
+    """
+    Scan for same-venue box spreads (YES + NO ≈ 100c).
+    
+    This is cross-sectional arbitrage within Kalshi: buying both YES and NO
+    when their sum is significantly below 100c (after fees), or selling both
+    when their sum is significantly above 100c.
+    
+    Returns number of opportunities found.
+    """
+    scanner = _get_box_scanner()
+    if scanner is None:
+        return 0
+    
+    try:
+        opportunities = scanner.scan_once()
+        if opportunities:
+            log.info(f"Found {len(opportunities)} box spread opportunities")
+            for opp in opportunities:
+                log.info(
+                    "  BOX: %s | bid_sum=%d (dev=%.1fc) ask_sum=%d (dev=%.1fc) | net_edge=%.2fc",
+                    opp.ticker, opp.bid_sum, opp.bid_deviation,
+                    opp.ask_sum, opp.ask_deviation, opp.net_edge_cents
+                )
+        return len(opportunities)
+    except Exception as e:
+        log.warning("Box scanner failed: %s", e)
+        return 0
 
 
 def _check_cross_venue_arb(client: KalshiClient) -> list:
@@ -1904,6 +1950,14 @@ def cycle(client: KalshiClient):
                         log.info(f"Executed {executed} cross-venue arbitrage trades")
                 except Exception as e:
                     log.warning("Cross-venue arb execution failed: %s", e)
+
+    # Same-venue box spread scan (T15-30) — cross-sectional arbitrage
+    # YES + NO ≈ 100c within Kalshi (riskless arb if deviation > fees)
+    if config.BOX_SCANNER_ENABLED if hasattr(config, 'BOX_SCANNER_ENABLED') else True:
+        if cash_available:
+            box_count = _scan_box_spreads(client)
+            if box_count:
+                log.info(f"Box scanner found {box_count} opportunities")
 
     # Pre-entry gates: ATR hurdle, fee-adjusted EV, time-decay cushion.
     # Shadow mode (default) logs would-block decisions without blocking.

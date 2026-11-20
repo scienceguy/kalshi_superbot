@@ -250,6 +250,13 @@ CROSS_VENUE_LEG_TIMEOUT_SECONDS = _env_float("CROSS_VENUE_LEG_TIMEOUT_SECONDS", 
 CROSS_VENUE_MAX_LEG_RISK_DOLLARS = _env_float("CROSS_VENUE_MAX_LEG_RISK_DOLLARS", 10.0)
 CROSS_VENUE_FLATTEN_ON_TIMEOUT = _env_bool("CROSS_VENUE_FLATTEN_ON_TIMEOUT", True)
 
+# Same-Venue Box Scanner (T15-30) — Cross-sectional arbitrage
+# YES + NO ≈ 100c within Kalshi (riskless arb if deviation > fees)
+BOX_SCANNER_ENABLED = _env_bool("BOX_SCANNER_ENABLED", True)
+BOX_SCANNER_INTERVAL_SECONDS = _env_float("BOX_SCANNER_INTERVAL_SECONDS", 60.0)
+BOX_SCANNER_MIN_EDGE_CENTS = _env_float("BOX_SCANNER_MIN_EDGE_CENTS", 0.5)
+BOX_SCANNER_MIN_LIQUIDITY = _env_int("BOX_SCANNER_MIN_LIQUIDITY", 10)
+
 # Local DB → Supabase background sync interval. Trading bots need fast crash
 # protection: a 5-minute sync window can lose up to 5 minutes of P&L/state on
 # a crash. 30s keeps the local→online gap small without hammering Supabase.
