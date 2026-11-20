@@ -6,9 +6,10 @@ Updated 2026-11-20 after completing v15 Phase 0 (T15-00 through T15-05) + cross-
 
 ```
 python -m pytest tests/ -q
--> 384 passed in 9.95s
+-> 384 passed in 10.15s
 
-git log --oneline -15
+git log --oneline -20
+-> 990cef2 T15-31..35: Phase 3 Gates & Risk implementation
 -> 2078324 T15-10/T15-13: spot_composite tests + tick_store verified
 -> 56fa8c1 T15-11/T15-12: BRTI tracker + venue books with book-age gate
 -> 0bd7eda T15-03/T15-04: Sigma calibration + config consistency
@@ -103,13 +104,24 @@ All 384 tests pass. Tree is clean on branch `v15-task-list`.
 - T15-24: Cross-sectional arb scanner
 - T15-25: Tests for arb stack
 
-### Phase 3 Gates & Risk (T15-30..35) ⏳
-- T15-30: Time-decay cushion with corrected sigma (DONE in T15-03)
-- T15-31: High-gamma zone with live calibration
-- T15-32: Measured floor re-verification (YES-equivalent only)
-- T15-33: Risk limits audit (equity-scaled, per-market loss)
-- T15-34: Latency regression gate (P95 < 100ms)
-- T15-35: KL-divergence + box arb integration
+### Phase 3 Gates & Risk (T15-30..35) ✅ DONE
+
+| Commit | File | Change |
+|--------|------|--------|
+| `990cef2` | `config.py` | Added `GATES_HIGH_GAMMA_CALIBRATED`, `GATES_HIGH_GAMMA_CALIBRATION_LOOKBACK_DAYS`, `GATES_HIGH_GAMMA_MIN_SAMPLES` |
+| `990cef2` | `gates.py` | Added `_get_high_gamma_threshold()`, `_refresh_high_gamma_calibration()`; Gate 3 uses calibrated threshold |
+| `990cef2` | `scripts/measure_high_gamma.py` | New script for live high-gamma calibration from settled markets |
+| `990cef2` | `scripts/measure_edge.py` | Updated for YES/NO native prices; 95-99c band: 116 quotes, 100% win rate |
+| `990cef2` | `risk.py` | Verified equity-scaled: MAX_TRADE_PCT_OF_EQUITY (5%), MIN_CASH_PCT_OF_EQUITY (0.5%), MARKET_DAILY_LOSS_PCT (10%) |
+| `990cef2` | `event_hotpath.py` | Added `latency_gate_p95_threshold_ms` (100ms), `is_latency_healthy()` for P95 regression gate |
+| `990cef2` | `box_arbitrage.py` | KL integration: `kl_edge`, `ladder_kl`, `ensemble_kl`, `ensemble_allow` on `BoxOpportunity`; `compute_kl_metrics()`, `scan_for_boxes_with_kl()` |
+
+**Phase 3 Summary:**
+- T15-31: High-gamma zone live calibration — `_get_high_gamma_threshold(asset)` uses calibrated value from config or live measurement
+- T15-32: Measured floor re-verification — 95-99c band clears with 100% win rate (116 quotes), GATES_MEASURED_Q=0.9928 conservative
+- T15-33: Risk limits audit — equity-scaled max trade (5%), min cash (0.5%), per-market daily loss (10% portfolio value)
+- T15-34: Latency regression gate — P95 end-to-end < 100ms blocks trading via `is_latency_healthy()`
+- T15-35: KL-divergence + box arb integration — box opportunities scored with Bernoulli KL, ladder KL, ensemble disagreement gate
 
 ## Known Issues / Blockers
 
