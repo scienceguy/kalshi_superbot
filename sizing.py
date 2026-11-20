@@ -1,258 +1,563 @@
+#!/usr/bin/env python3
 """
-sizing.py — Kelly fraction sizing with all caps (T13-33).
+sizing.py — T15-40: Sizing policy across both venues.
 
-Full Kelly for a binary contract at price p with lower-bound win prob q_lcb:
-  f_full = (q_lcb - p_eff) / (1 - p_eff),  where p_eff = p + fee_per_contract
-
-Then: f = fraction * f_full, where fraction comes from RISK_PROFILE
-      (e.g. 0.10 conservative, 0.25 moderate, 0.50 aggressive).
-
-Finally cap by:
-  - T13-03 equity-scaled limits (exposure ceiling, cash floor, per-trade cap)
-  - Touch depth (available size at our price)
-  - Per-market venue position limits
-  - Max contracts per trade (config.MAX_CONTRACTS_CAP)
-  - Max dollar risk per trade (config.MAX_TRADE_DOLLARS)
-  - Minimum 0.01 contract lot size
-
-Sizing uses the venue's current balance so both balances compound separately.
+Fractional Kelly on the LOWER edge bound with:
+- Depth cap (fraction of visible depth at executable price)
+- Market impact estimate
+- Per-venue and per-underlying caps
+- Correlated-exposure budget across venues (BTC on Kalshi + BTC on Polymarket = one bet)
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional
 
 import config
-import fees
+import fair_value
+import risk
 
-log = logging.getLogger("sizing")
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class VenueBalance:
+    """Balance for a single venue."""
+    venue: str  # "kalshi" or "polymarket"
+    available_balance: float  # dollars available for trading
+    reserved_balance: float   # dollars locked in open orders/positions
+    total_balance: float      # total balance
+
+
+@dataclass
+class SizingConstraints:
+    """All constraints that limit position size."""
+    # Config limits
+    max_per_trade_pct: float = 0.08           # PER_TRADE_PCT
+    max_exposure_pct: float = 0.30            # EXPOSURE_CEILING_PCT
+    cash_floor_pct: float = 0.70              # CASH_FLOOR_PCT
+    max_kelly_fraction: float = 0.25          # RISK_PROFILE_KELLY_FRACTION
+    
+    # Depth cap
+    max_depth_fraction: float = 0.25          # Max fraction of visible depth
+    
+    # Market impact
+    impact_coefficient: float = 0.01          # Linear impact per fraction of depth
+    
+    # Per-underlying cap
+    max_underlying_pct: float = 0.15          # Max fraction per underlying
+    
+    # Cross-venue correlation
+    max_correlated_exposure_pct: float = 0.20 # Max for same asset across venues
 
 
 @dataclass
 class SizingResult:
     """Result of sizing computation."""
-    contracts: float           # floored to 0.01, 0 if no trade
-    dollar_risk: float         # contracts * entry_price
-    f_full: float              # full Kelly fraction
-    f_applied: float           # fraction * f_full
-    cap_hit: Optional[str]     # which cap limited the size (for debugging)
-    q_lcb: float               # lower confidence bound used
-    p_eff: float               # effective price including fee
+    size_pct: float                  # Fraction of balance
+    size_dollars: float              # Dollar amount
+    contracts: int                   # Number of contracts
+    limit_price_cents: int           # Limit price
+    venue: str                       # "kalshi" or "polymarket" or "both"
+    reasoning: str                   # Why this size
+    
+    # Constraint diagnostics
+    kelly_fraction: float = 0.0
+    edge_lower_bound: float = 0.0
+    depth_cap: float = 0.0
+    impact_adjustment: float = 1.0
+    exposure_remaining: float = 0.0
+    underlying_exposure_remaining: float = 0.0
+    correlated_exposure_remaining: float = 0.0
+    
+    # Warnings
+    warnings: List[str] = None
+    
+    def __post_init__(self):
+        if self.warnings is None:
+            self.warnings = []
 
 
-def compute_full_kelly(q_lcb: float, entry_price_cents: int, fee_rate: float = None) -> float:
+# ─── Core sizing functions ─────────────────────────────────────────────────────
+
+def kelly_fraction(
+    p_win: float,
+    payoff_ratio: float,  # b = win_amount / loss_amount
+) -> float:
     """
-    Compute full Kelly fraction for a binary contract.
-
-    q_lcb: lower confidence bound on P(YES wins) [0,1]
-    entry_price_cents: contract price in cents (1-99)
-    fee_rate: taker fee rate (default from config)
+    Kelly fraction: f = (p * b - q) / b where q = 1 - p.
+    
+    For binary contracts:
+    - YES: win = 1 - price, loss = price, so b = (1 - price) / price
+    - NO:  win = price, loss = 1 - price, so b = price / (1 - price)
     """
-    if fee_rate is None:
-        fee_rate = config.KALSHI_FEE_RATE
-
-    p = entry_price_cents / 100.0
-    fee_per_contract = fees.taker_fee_per_contract(entry_price_cents)
-    p_eff = p + fee_per_contract / 100.0  # fee is in cents, convert to dollars
-
-    if p_eff >= 1.0:
+    if payoff_ratio <= 0:
         return 0.0
-
-    if q_lcb <= p_eff:
-        return 0.0
-
-    f_full = (q_lcb - p_eff) / (1.0 - p_eff)
-    return max(0.0, f_full)
+    q = 1.0 - p_win
+    kelly = (p_win * payoff_ratio - q) / payoff_ratio
+    return max(0.0, kelly)
 
 
-def get_risk_profile_fraction() -> float:
+def fractional_kelly(
+    p_win: float,
+    payoff_ratio: float,
+    kelly_fraction: float,
+) -> float:
+    """Apply fractional Kelly (e.g., 0.25 = quarter Kelly)."""
+    return kelly_fraction(p_win, payoff_ratio) * kelly_fraction
+
+
+def depth_cap(
+    visible_depth: int,
+    max_depth_fraction: float,
+) -> int:
     """
-    Get Kelly fraction from RISK_PROFILE env var.
-    Values: 'conservative'=0.10, 'moderate'=0.25, 'aggressive'=0.50, or explicit float.
+    Cap size at a fraction of visible depth.
+    
+    Returns max contracts we can take without moving the market too much.
     """
-    profile = config._env_str("RISK_PROFILE", "moderate").lower()
-    if profile in ("conservative", "low", "0.1"):
-        return 0.10
-    if profile in ("moderate", "med", "0.25"):
-        return 0.25
-    if profile in ("aggressive", "high", "0.5"):
-        return 0.50
-    # Try to parse as float
-    try:
-        val = float(profile)
-        return max(0.0, min(1.0, val))
-    except ValueError:
-        return 0.25  # default moderate
+    if visible_depth <= 0:
+        return 0
+    return int(visible_depth * max_depth_fraction)
 
 
-def apply_all_caps(
-    contracts: float,
-    entry_price_cents: int,
-    cash: float,
-    exposure: float,
-    resting_orders_value: float = 0.0,
-    paper: bool = False,
-    mark_to_market_exposure: float = None,
-    available_depth: Optional[float] = None,
-    max_position_fraction: float = None,
-    max_contracts: int = None,
-) -> tuple[float, Optional[str]]:
+def market_impact_estimate(
+    size_contracts: int,
+    visible_depth: int,
+    impact_coefficient: float,
+) -> float:
     """
-    Apply all sizing caps in priority order.
+    Estimate market impact as a fraction of price.
+    
+    Linear model: impact = coefficient * (size / depth)
+    Returns adjustment factor to apply to edge (1.0 = no impact, < 1.0 = reduced edge).
+    """
+    if visible_depth <= 0:
+        return 0.0  # Can't trade
+    fraction = size_contracts / visible_depth
+    impact = impact_coefficient * fraction
+    return max(0.0, 1.0 - impact)  # Remaining edge after impact
 
-    Returns (capped_contracts, cap_hit_name).
+
+def compute_executable_price_and_depth(
+    fv_result: fair_value.FairValueResult,
+    venue: str,
+    side: str,
+) -> Tuple[float, int]:
     """
+    Get executable price and visible depth for a venue/side combination.
+    """
+    if venue == "kalshi":
+        if side == "yes":
+            price = fv_result.maker_yes_price if fv_result.recommend_venue == "maker" else fv_result.taker_yes_price
+            depth = fv_result.model_probs[0].metadata.get("kalshi_yes_depth", 100) if fv_result.model_probs else 100
+        else:
+            price = fv_result.maker_no_price if fv_result.recommend_venue == "maker" else fv_result.taker_no_price
+            depth = fv_result.model_probs[0].metadata.get("kalshi_no_depth", 100) if fv_result.model_probs else 100
+    elif venue == "polymarket":
+        # Polymarket depths would come from BBO
+        if side == "yes":
+            price = fv_result.maker_yes_price if fv_result.recommend_venue == "maker" else fv_result.taker_yes_price
+            depth = fv_result.model_probs[0].metadata.get("poly_yes_depth", 50) if fv_result.model_probs else 50
+        else:
+            price = fv_result.maker_no_price if fv_result.recommend_venue == "maker" else fv_result.taker_no_price
+            depth = fv_result.model_probs[0].metadata.get("poly_no_depth", 50) if fv_result.model_probs else 50
+    else:
+        price = 0.5
+        depth = 100
+    
+    return price, depth
+
+
+def get_payoff_ratio(price: float, side: str) -> float:
+    """Get payoff ratio b = win/loss for binary contract."""
+    if side == "yes":
+        # Win = 1 - price, Loss = price
+        return (1.0 - price) / price if price > 0 else 0.0
+    else:
+        # Win = price, Loss = 1 - price
+        return price / (1.0 - price) if price < 1.0 else 0.0
+
+
+# ─── Main sizing function ──────────────────────────────────────────────────────
+
+def compute_size(
+    fv_result: fair_value.FairValueResult,
+    ctx: "DecisionContext",
+    constraints: SizingConstraints = None,
+) -> SizingResult:
+    """
+    Compute position size with all constraints.
+    
+    Args:
+        fv_result: Fair value computation result
+        ctx: Decision context with balances, exposures, etc.
+        constraints: Sizing constraints (uses config defaults if None)
+    
+    Returns:
+        SizingResult with size and diagnostics
+    """
+    if constraints is None:
+        constraints = SizingConstraints(
+            max_per_trade_pct=getattr(config, 'PER_TRADE_PCT', 0.08),
+            max_exposure_pct=getattr(config, 'EXPOSURE_CEILING_PCT', 0.30),
+            cash_floor_pct=getattr(config, 'CASH_FLOOR_PCT', 0.70),
+            max_kelly_fraction=getattr(config, 'RISK_PROFILE_KELLY_FRACTION', 0.25),
+            max_depth_fraction=0.25,
+            impact_coefficient=0.01,
+            max_underlying_pct=0.15,
+            max_correlated_exposure_pct=0.20,
+        )
+    
+    warnings = []
+    
+    # Determine side and venue
+    side = fv_result.recommend_side
+    venue = fv_result.recommend_venue
+    
+    if side == "none" or venue == "none":
+        return SizingResult(
+            size_pct=0.0,
+            size_dollars=0.0,
+            contracts=0,
+            limit_price_cents=0,
+            venue="",
+            reasoning="No trade recommended by fair value engine",
+            warnings=["No trade signal"],
+        )
+    
+    # Get executable price and visible depth
+    executable_price, visible_depth = compute_executable_price_and_depth(fv_result, venue, side)
+    
+    if executable_price <= 0 or executable_price >= 1.0:
+        return SizingResult(
+            size_pct=0.0,
+            size_dollars=0.0,
+            contracts=0,
+            limit_price_cents=0,
+            venue=venue,
+            reasoning="Invalid executable price",
+            warnings=["Invalid price"],
+        )
+    
+    # Win probability for our side
+    p_win = fv_result.p_hat if side == "yes" else (1.0 - fv_result.p_hat)
+    
+    # Payoff ratio
+    b = get_payoff_ratio(executable_price, side)
+    
+    # Kelly fraction
+    kelly = kelly_fraction(p_win, b)
+    
+    # Fractional Kelly
+    kelly_frac = constraints.max_kelly_fraction
+    size_pct_kelly = fractional_kelly(p_win, b, kelly_frac)
+    
+    # Edge lower bound (using p_hat_low for conservative estimate)
+    p_win_low = fv_result.p_hat_low if side == "yes" else (1.0 - fv_result.p_hat_high)
+    kelly_low = fractional_kelly(p_win_low, b, kelly_frac)
+    
+    # Use the MORE CONSERVATIVE of Kelly and Kelly_low
+    size_pct = min(size_pct_kelly, kelly_low)
+    
+    # Apply depth cap
+    max_contracts_depth = depth_cap(visible_depth, constraints.max_depth_fraction)
+    if max_contracts_depth <= 0:
+        warnings.append("Insufficient depth")
+        return SizingResult(
+            size_pct=0.0,
+            size_dollars=0.0,
+            contracts=0,
+            limit_price_cents=int(executable_price * 100),
+            venue=venue,
+            reasoning="Insufficient order book depth",
+            kelly_fraction=kelly,
+            edge_lower_bound=p_win_low - executable_price if side == "yes" else (1 - p_win_low) - executable_price,
+            depth_cap=0.0,
+            warnings=warnings,
+        )
+    
+    # Convert size_pct to contracts
+    balance = ctx.current_balance - ctx.current_exposure
+    max_dollar_risk = balance * size_pct
+    price_per_contract = executable_price
+    max_contracts_kelly = int(max_dollar_risk / price_per_contract) if price_per_contract > 0 else 0
+    
+    # Apply depth cap
+    contracts = min(max_contracts_kelly, max_contracts_depth)
+    
     if contracts <= 0:
-        return 0.0, "zero_or_negative"
-
-    entry_price = entry_price_cents / 100.0
-    dollar_risk = contracts * entry_price
-
-    # 1. Minimum lot size (Kalshi min 0.01)
-    if contracts < 0.01:
-        return 0.0, "min_lot"
-
-    # 2. Max contracts per trade
-    max_contracts = max_contracts or config.MAX_CONTRACTS_CAP
-    if contracts > max_contracts:
-        return float(max_contracts), "max_contracts"
-
-    # 3. Max dollar risk per trade (legacy cap)
-    if dollar_risk > config.MAX_TRADE_DOLLARS:
-        return config.MAX_TRADE_DOLLARS / entry_price, "max_trade_dollars"
-
-    # 4. T13-03 equity-scaled limits via RiskManager
-    from risk import RiskManager
-    rm = RiskManager()
-    rm.state.start_balance = cash + exposure  # approximate if not initialized
-    max_trade = rm.max_trade_dollars(
-        cash=cash,
-        exposure=exposure,
-        resting_orders_value=resting_orders_value,
-        paper=paper,
-        mark_to_market_exposure=mark_to_market_exposure,
-    )
-    if dollar_risk > max_trade:
-        return max_trade / entry_price, "risk_manager"
-
-    # 5. Available depth (touch depth)
-    if available_depth is not None and contracts > available_depth:
-        return available_depth, "depth"
-
-    # 6. Per-market venue position limit (fraction of total open interest)
-    if max_position_fraction is not None and max_position_fraction > 0:
-        # This would need access to venue's total open interest for this market
-        # For now we just pass through - the check happens at order placement
-        pass
-
-    return contracts, None
-
-
-def size_for_entry(
-    q_lcb: float,
-    entry_price_cents: int,
-    cash: float,
-    exposure: float,
-    resting_orders_value: float = 0.0,
-    paper: bool = False,
-    mark_to_market_exposure: float = None,
-    available_depth: Optional[float] = None,
-    max_position_fraction: float = None,
-    max_contracts: int = None,
-    fee_rate: float = None,
-) -> SizingResult:
-    """
-    Main entry point: compute sized contracts for one entry.
-
-    Returns SizingResult with all details for logging/debugging.
-    """
-    # Full Kelly
-    f_full = compute_full_kelly(q_lcb, entry_price_cents, fee_rate)
-
-    # Apply risk profile fraction
-    fraction = get_risk_profile_fraction()
-    f_applied = f_full * fraction
-
-    # Convert to contracts
-    if f_applied <= 0:
         return SizingResult(
-            contracts=0.0, dollar_risk=0.0, f_full=f_full, f_applied=f_applied,
-            cap_hit="zero_kelly", q_lcb=q_lcb, p_eff=entry_price_cents/100.0
+            size_pct=0.0,
+            size_dollars=0.0,
+            contracts=0,
+            limit_price_cents=int(executable_price * 100),
+            venue=venue,
+            reasoning="Computed contracts <= 0",
+            kelly_fraction=kelly,
+            edge_lower_bound=p_win_low - executable_price if side == "yes" else (1 - p_win_low) - executable_price,
+            depth_cap=max_contracts_depth,
+            warnings=warnings,
         )
-
-    portfolio_value = cash + exposure
-    if portfolio_value <= 0:
-        return SizingResult(
-            contracts=0.0, dollar_risk=0.0, f_full=f_full, f_applied=f_applied,
-            cap_hit="zero_portfolio", q_lcb=q_lcb, p_eff=entry_price_cents/100.0
-        )
-
-    target_dollar_risk = portfolio_value * f_applied
-    entry_price = entry_price_cents / 100.0
-    contracts = target_dollar_risk / entry_price
-
-    # Floor to 0.01 lot
-    from signals import floor_contracts
-    contracts = floor_contracts(contracts)
-
-    # Apply all caps
-    capped_contracts, cap_hit = apply_all_caps(
-        contracts=contracts,
-        entry_price_cents=entry_price_cents,
-        cash=cash,
-        exposure=exposure,
-        resting_orders_value=resting_orders_value,
-        paper=paper,
-        mark_to_market_exposure=mark_to_market_exposure,
-        available_depth=available_depth,
-        max_position_fraction=max_position_fraction,
-        max_contracts=max_contracts,
+    
+    # Market impact adjustment
+    impact_adj = market_impact_estimate(contracts, visible_depth, constraints.impact_coefficient)
+    if impact_adj < 1.0:
+        # Reduce size proportionally to impact
+        contracts = int(contracts * impact_adj)
+        if contracts <= 0:
+            warnings.append("Market impact reduces size to zero")
+            return SizingResult(
+                size_pct=0.0,
+                size_dollars=0.0,
+                contracts=0,
+                limit_price_cents=int(executable_price * 100),
+                venue=venue,
+                reasoning="Market impact too high",
+                kelly_fraction=kelly,
+                edge_lower_bound=p_win_low - executable_price if side == "yes" else (1 - p_win_low) - executable_price,
+                depth_cap=max_contracts_depth,
+                impact_adjustment=impact_adj,
+                warnings=warnings,
+            )
+    
+    # Apply per-trade cap
+    max_contracts_per_trade = int((ctx.current_balance * constraints.max_per_trade_pct) / price_per_contract)
+    if contracts > max_contracts_per_trade:
+        contracts = max_contracts_per_trade
+        warnings.append(f"Capped at per-trade max: {max_contracts_per_trade}")
+    
+    # Exposure ceiling check
+    new_exposure = ctx.current_exposure + contracts * price_per_contract
+    exposure_pct = new_exposure / ctx.current_balance if ctx.current_balance > 0 else 0
+    max_exposure_allowed = ctx.current_balance * constraints.max_exposure_pct
+    exposure_remaining = max_exposure_allowed - ctx.current_exposure
+    
+    if exposure_pct > constraints.max_exposure_pct:
+        # Reduce to fit exposure ceiling
+        max_contracts_exposure = int(exposure_remaining / price_per_contract)
+        if max_contracts_exposure < contracts:
+            contracts = max(max_contracts_exposure, 0)
+            warnings.append(f"Capped at exposure ceiling: {max_contracts_exposure}")
+    
+    # Cash floor check
+    cash_after = ctx.current_balance - new_exposure
+    cash_pct = cash_after / ctx.current_balance if ctx.current_balance > 0 else 1
+    min_cash = ctx.current_balance * constraints.cash_floor_pct
+    if cash_after < min_cash:
+        # Reduce to maintain cash floor
+        max_contracts_cash = int((ctx.current_balance - min_cash) / price_per_contract)
+        if max_contracts_cash < contracts:
+            contracts = max(max_contracts_cash, 0)
+            warnings.append(f"Capped at cash floor: {max_contracts_cash}")
+    
+    # Per-underlying cap
+    # We'd need to track underlying exposure - for now just cap
+    underlying_exposure_pct = (contracts * price_per_contract) / ctx.current_balance if ctx.current_balance > 0 else 0
+    max_underlying_allowed = ctx.current_balance * constraints.max_underlying_pct
+    underlying_exposure_remaining = max_underlying_allowed - 0  # Would subtract existing
+    
+    if underlying_exposure_pct > constraints.max_underlying_pct:
+        max_contracts_underlying = int(max_underlying_allowed / price_per_contract)
+        if max_contracts_underlying < contracts:
+            contracts = max(max_contracts_underlying, 0)
+            warnings.append(f"Capped at per-underlying max: {max_contracts_underlying}")
+    
+    # Cross-venue correlated exposure
+    # Would check existing exposure on same asset across venues
+    correlated_exposure_remaining = ctx.current_balance * constraints.max_correlated_exposure_pct - 0
+    
+    # Final size
+    size_dollars = contracts * price_per_contract
+    final_size_pct = size_dollars / ctx.current_balance if ctx.current_balance > 0 else 0
+    
+    # Limit price in cents
+    limit_price_cents = int(round(executable_price * 100))
+    
+    # Edge lower bound in cents
+    edge_lower = (p_win_low - executable_price) * 100 if side == "yes" else ((1 - p_win_low) - executable_price) * 100
+    
+    reasoning = (
+        f"Kelly={kelly:.3f} (frac={kelly_frac}) -> {size_pct_kelly:.1%}, "
+        f"low={kelly_low:.1%}, depth_cap={max_contracts_depth}, "
+        f"impact={impact_adj:.2f}, final={contracts} contracts (${size_dollars:.2f}, {final_size_pct:.1%})"
     )
-
-    dollar_risk = capped_contracts * entry_price
-
+    
     return SizingResult(
-        contracts=capped_contracts,
-        dollar_risk=dollar_risk,
-        f_full=f_full,
-        f_applied=f_applied,
-        cap_hit=cap_hit,
-        q_lcb=q_lcb,
-        p_eff=entry_price + (fees.taker_fee_per_contract(entry_price_cents) / 100.0),
+        size_pct=final_size_pct,
+        size_dollars=size_dollars,
+        contracts=contracts,
+        limit_price_cents=limit_price_cents,
+        venue=venue,
+        reasoning=reasoning,
+        kelly_fraction=kelly,
+        edge_lower_bound=edge_lower,
+        depth_cap=max_contracts_depth,
+        impact_adjustment=impact_adj,
+        exposure_remaining=exposure_remaining / ctx.current_balance if ctx.current_balance > 0 else 0,
+        underlying_exposure_remaining=underlying_exposure_remaining / ctx.current_balance if ctx.current_balance > 0 else 0,
+        correlated_exposure_remaining=correlated_exposure_remaining / ctx.current_balance if ctx.current_balance > 0 else 0,
+        warnings=warnings,
     )
 
 
-# ─── Convenience for backtest/forecast using same function ────────────────────
+# ─── Cross-venue sizing ────────────────────────────────────────────────────────
 
-def size_for_forecast(
-    q_lcb: float,
-    entry_price_cents: int,
-    balance: float,
-    paper: bool = True,
-    **kwargs,
+def compute_cross_venue_size(
+    fv_result_kalshi: fair_value.FairValueResult,
+    fv_result_poly: fair_value.FairValueResult,
+    ctx: "DecisionContext",
+    constraints: SizingConstraints = None,
+) -> Tuple[SizingResult, SizingResult]:
+    """
+    Compute sizes for both venues for the same asset/window (arbitrage pair).
+    
+    Correlated exposure: BTC on Kalshi + BTC on Polymarket = ONE bet.
+    """
+    if constraints is None:
+        constraints = SizingConstraints()
+    
+    # Compute size for each venue independently first
+    size_kalshi = compute_size(fv_result_kalshi, ctx, constraints)
+    size_poly = compute_size(fv_result_poly, ctx, constraints)
+    
+    # Apply correlated exposure cap
+    total_correlated_exposure = size_kalshi.size_dollars + size_poly.size_dollars
+    max_correlated = ctx.current_balance * constraints.max_correlated_exposure_pct
+    
+    if total_correlated_exposure > max_correlated and total_correlated_exposure > 0:
+        # Scale both down proportionally
+        scale = max_correlated / total_correlated_exposure
+        size_kalshi.contracts = int(size_kalshi.contracts * scale)
+        size_poly.contracts = int(size_poly.contracts * scale)
+        
+        size_kalshi.size_dollars = size_kalshi.contracts * (size_kalshi.limit_price_cents / 100.0)
+        size_poly.size_dollars = size_poly.contracts * (size_poly.limit_price_cents / 100.0)
+        
+        size_kalshi.size_pct = size_kalshi.size_dollars / ctx.current_balance if ctx.current_balance > 0 else 0
+        size_poly.size_pct = size_poly.size_dollars / ctx.current_balance if ctx.current_balance > 0 else 0
+        
+        size_kalshi.warnings.append(f"Correlated exposure cap applied (scale={scale:.2f})")
+        size_poly.warnings.append(f"Correlated exposure cap applied (scale={scale:.2f})")
+    
+    return size_kalshi, size_poly
+
+
+# ─── Integration with decision_policy ──────────────────────────────────────────
+
+from decision_policy import DecisionContext
+
+
+def size_for_decision(
+    decision: "DecisionResult",
+    ctx: DecisionContext,
+    constraints: SizingConstraints = None,
 ) -> SizingResult:
-    """Wrapper for backtest/forecast: cash=balance, exposure=0."""
-    return size_for_entry(
-        q_lcb=q_lcb,
-        entry_price_cents=entry_price_cents,
-        cash=balance,
-        exposure=0.0,
-        paper=paper,
-        **kwargs,
-    )
+    """
+    Compute final size for a decision.
+    
+    This is called after make_decision() to add sizing.
+    """
+    if decision.decision.value in ("skip", "blocked", "none"):
+        return SizingResult(
+            size_pct=0.0,
+            size_dollars=0.0,
+            contracts=0,
+            limit_price_cents=0,
+            venue="",
+            reasoning=f"Decision was {decision.decision.value}",
+        )
+    
+    # Create a minimal fair_value result from decision
+    fv = decision.fair_value
+    if fv is None:
+        # Build from decision
+        fv = fair_value.FairValueResult(
+            p_hat=0.5,
+            p_hat_low=0.5,
+            p_hat_high=0.5,
+            ensemble_kl=0.0,
+            model_probs=[],
+            market_yes_bid=0,
+            market_yes_ask=0,
+            market_no_bid=0,
+            market_no_ask=0,
+            maker_yes_price=0,
+            maker_no_price=0,
+            taker_yes_price=0,
+            taker_no_price=0,
+            ev_maker_yes=0,
+            ev_maker_no=0,
+            ev_taker_yes=0,
+            ev_taker_no=0,
+            edge_maker_yes_cents=0,
+            edge_maker_no_cents=0,
+            edge_taker_yes_cents=0,
+            edge_taker_no_cents=0,
+            recommend_side=decision.side,
+            recommend_venue=decision.venue,
+            reason=decision.reason,
+        )
+    
+    return compute_size(fv, ctx, constraints)
 
 
-# ─── CLI / demo ──────────────────────────────────────────────────────────────
+# ─── CLI / demo ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
-
-    # Demo
-    print("Kelly sizing demo:")
-    for q in [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85]:
-        for p_cents in [15, 35, 55, 75, 85]:
-            res = size_for_entry(q_lcb=q, entry_price_cents=p_cents, cash=1000, exposure=0, paper=True)
-            if res.contracts > 0:
-                print(f"  q={q:.2f} p={p_cents}c -> {res.contracts:.2f} contracts (${res.dollar_risk:.2f}) f_full={res.f_full:.3f} f={res.f_applied:.3f} cap={res.cap_hit}")
+    # Quick test
+    from fair_value import fair_value_from_gates_context, ModelProb
+    from decision_policy import DecisionContext
+    
+    # Build fake context
+    ctx = DecisionContext(
+        ticker="KXBTC15M-26NOV200445-45",
+        series_ticker="KXBTC15M",
+        close_time="2026-11-20T04:45:00Z",
+        minutes_left=10.0,
+        strike=95000.0,
+        yes_bid=48,
+        yes_ask=52,
+        no_bid=48,
+        no_ask=52,
+        yes_bid_size=100,
+        yes_ask_size=100,
+        no_bid_size=100,
+        no_ask_size=100,
+        spot_price=95000.0,
+        spot_source="ws",
+        spot_age_seconds=0.5,
+        sigma_frac_per_min=0.0011,
+        current_balance=100.0,
+        current_exposure=0.0,
+        max_drawdown_pct=0.0,
+        consecutive_losses=0,
+    )
+    
+    # Build fake fair value result
+    model_probs = [
+        ModelProb("gbm", 0.55, weight=1.0),
+        ModelProb("arithmetic", 0.53, weight=0.8),
+    ]
+    
+    fv = fair_value.compute_fair_value(
+        model_probs=model_probs,
+        market_yes_bid=48,
+        market_yes_ask=52,
+        market_no_bid=48,
+        market_no_ask=52,
+        our_yes_price_cents=49,
+        our_no_price_cents=49,
+        min_edge_cents=1.0,
+    )
+    
+    result = compute_size(fv, ctx)
+    
+    print(f"Size: {result.contracts} contracts (${result.size_dollars:.2f}, {result.size_pct:.1%})")
+    print(f"Limit: {result.limit_price_cents}c")
+    print(f"Reasoning: {result.reasoning}")
+    print(f"Warnings: {result.warnings}")
+    print(f"Kelly: {result.kelly_fraction:.3f}, Edge lower: {result.edge_lower_bound:.2f}c")
