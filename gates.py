@@ -251,6 +251,19 @@ def normal_cdf(z: float) -> float:
     """Standard normal CDF via math.erf. Delegates to gbm.normal_cdf."""
     return gbm.normal_cdf(z)
 
+# ─── KL divergence re-exports (for cross-venue arb, fixes F-03) ───────────────
+
+from kl_divergence import (
+    bernoulli_kl,
+    symmetric_kl,
+    symmetric_kl_detailed,
+    ladder_kl,
+    ensemble_kl,
+    ensemble_disagreement_gate,
+    kl_edge_score,
+    market_prob_from_price,
+)
+
 
 # ═════════════════════════════════════════════════════════════════════
 # RESULT
