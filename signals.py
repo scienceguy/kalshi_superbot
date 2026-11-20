@@ -21,6 +21,7 @@ from typing import Literal, Optional
 import config
 import fees
 import gates
+import sizing
 from market_finder import MarketInfo
 from model import model_probability_from_market, edge_cents
 
@@ -356,9 +357,19 @@ def _evaluate_common(
     minutes_in: float,
     source: str,
     strength: float,
+    cash: float = None,
+    exposure: float = None,
+    resting_orders_value: float = 0.0,
+    trade_prob: float = None,
 ):
     """
     Shared evaluation logic. Returns TradeSignal or None.
+
+    New params (T13-33 Kelly sizing):
+    - cash: venue cash balance
+    - exposure: current mark-to-market exposure
+    - resting_orders_value: value of open limit orders
+    - trade_prob: model's win probability for this trade (q_lcb for Kelly)
     """
     def _pass(r):
         return TradeSignal("PASS", "", 0, 0, 0.0, r, market)
@@ -386,12 +397,30 @@ def _evaluate_common(
         return _pass(f"{direction} price {ep}c outside band {entry_min}-{entry_max}c")
 
     # ── Size ────────────────────────────────────────────────────────────
-    n = _size(ep, max_dollars, max_contracts)
-    avail = market.yes_liquidity if bullish else market.no_liquidity
-    if avail and n > avail:
-        n = min(n, float(avail))
-    if n <= 0:
-        return _pass(f"Budget ${max_dollars:.2f} too low for {ep}c entry")
+    # T13-33: Use Kelly sizing when trade_prob, cash, exposure are provided
+    if trade_prob is not None and cash is not None and exposure is not None:
+        res = sizing.size_for_entry(
+            q_lcb=trade_prob,
+            entry_price_cents=ep,
+            cash=cash,
+            exposure=exposure,
+            resting_orders_value=resting_orders_value,
+            paper=config.DRY_RUN,
+            available_depth=market.yes_liquidity if bullish else market.no_liquidity,
+        )
+        n = res.contracts
+        cap_hit = res.cap_hit
+        if n <= 0:
+            return _pass(f"Kelly size 0 (f_full={res.f_full:.3f} f={res.f_applied:.3f} cap={cap_hit})")
+    else:
+        # Legacy sizing fallback
+        n = _size(ep, max_dollars, max_contracts)
+        avail = market.yes_liquidity if bullish else market.no_liquidity
+        if avail and n > avail:
+            n = min(n, float(avail))
+        if n <= 0:
+            return _pass(f"Budget ${max_dollars:.2f} too low for {ep}c entry")
+        cap_hit = "legacy"
 
     direction = "YES" if bullish else "NO"
     side = "yes" if bullish else "no"
@@ -418,7 +447,7 @@ def _evaluate_common(
 
     reason = (
         f"{direction} ({source}) str={strength:.0f} conf={confidence:.2f} "
-        f"{minutes_in:.1f}min {n:.4f}x@{ep}c=${risk_:.2f}"
+        f"{minutes_in:.1f}min {n:.4f}x@{ep}c=${risk_:.2f} cap={cap_hit}"
     )
     log.info("SIGNAL: %s — %s", market.ticker, reason)
     return TradeSignal(direction, side, ep, n, risk_, reason, market, strength, confidence)
@@ -433,7 +462,8 @@ def _evaluate_common(
 # ═════════════════════════════════════════════════════════════════════
 
 
-def _evaluate_hedge(market: MarketInfo, max_dollars: float, max_contracts: int = 0):
+def _evaluate_hedge(market: MarketInfo, max_dollars: float, max_contracts: int = 0,
+                     cash: float = None, exposure: float = None, resting_orders_value: float = 0.0):
     """
     HEDGE_NO: buy NO when YES is very cheap (protective hedge).
 
@@ -480,13 +510,30 @@ def _evaluate_hedge(market: MarketInfo, max_dollars: float, max_contracts: int =
         )
         return results
 
-    n = _size(ep, max_dollars, max_contracts)
-    avail = market.no_liquidity
-    if avail and n > avail:
-        n = min(n, float(avail))
-    if n <= 0:
-        _pass(f"Budget ${max_dollars:.2f} too low for {ep}c entry")
-        return results
+    # T13-33: Kelly sizing if cash/exposure provided
+    if cash is not None and exposure is not None:
+        res = sizing.size_for_entry(
+            q_lcb=0.75,  # Conservative estimate for hedge
+            entry_price_cents=ep,
+            cash=cash,
+            exposure=exposure,
+            resting_orders_value=resting_orders_value,
+            paper=config.DRY_RUN,
+            available_depth=market.no_liquidity,
+        )
+        n = res.contracts
+        if n <= 0:
+            _pass(f"Kelly size 0 (f_full={res.f_full:.3f} f={res.f_applied:.3f} cap={res.cap_hit})")
+            return results
+    else:
+        # Legacy sizing fallback
+        n = _size(ep, max_dollars, max_contracts)
+        avail = market.no_liquidity
+        if avail and n > avail:
+            n = min(n, float(avail))
+        if n <= 0:
+            _pass(f"Budget ${max_dollars:.2f} too low for {ep}c entry")
+            return results
 
     risk_ = n * ep / 100
     # Strength based on how far YES ask is below hedge max (wider edge = stronger)
@@ -502,7 +549,8 @@ def _evaluate_hedge(market: MarketInfo, max_dollars: float, max_contracts: int =
     return results
 
 
-def _evaluate_taker_favourite(market: MarketInfo, max_dollars: float, max_contracts: int = 0):
+def _evaluate_taker_favourite(market: MarketInfo, max_dollars: float, max_contracts: int = 0,
+                               cash: float = None, exposure: float = None, resting_orders_value: float = 0.0):
     """
     Final-minute taker strategy: pay the ask on the favourite in the final 60 seconds,
     hold to BRTI settlement.
@@ -617,6 +665,8 @@ def _evaluate_taker_favourite(market: MarketInfo, max_dollars: float, max_contra
             market, max_dollars, max_contracts, bullish,
             entry_min, entry_max, minutes_in,
             "TAKER_FAVOURITE", strength,
+            cash=cash, exposure=exposure, resting_orders_value=resting_orders_value,
+            trade_prob=trade_prob,
         )
         if sig and sig.is_trade:
             results.append(sig)
@@ -630,9 +680,15 @@ def _evaluate_taker_favourite(market: MarketInfo, max_dollars: float, max_contra
 # ═════════════════════════════════════════════════════════════════════
 
 def evaluate(market: MarketInfo, cash: float = 10.0,
-             max_trade_override: Optional[float] = None):
+             max_trade_override: Optional[float] = None,
+             exposure: float = 0.0,
+             resting_orders_value: float = 0.0):
     """
     Evaluate a market and return a list of TradeSignal (0 or 1 per market).
+
+    T13-33: additional params for Kelly sizing:
+    - exposure: current mark-to-market exposure
+    - resting_orders_value: value of open limit orders
     """
     now = time.time()
     _maybe_save_bid_hist(now)
@@ -645,11 +701,15 @@ def evaluate(market: MarketInfo, cash: float = 10.0,
     _track_bid(market.ticker, int(round(market.yes_bid or 0)), now)
 
     if market.bracket_role == "HEDGE_NO":
-        result = _evaluate_hedge(market, max_dollars)
+        result = _evaluate_hedge(market, max_dollars, cash=cash, exposure=exposure,
+                                 resting_orders_value=resting_orders_value)
     else:
         # Final-minute taker strategy (replaces two-sided favourite maker)
-        result = _evaluate_taker_favourite(market, max_dollars,
-                                           max_contracts_for_cash(effective_cash))
+        result = _evaluate_taker_favourite(
+            market, max_dollars,
+            max_contracts_for_cash(effective_cash),
+            cash=cash, exposure=exposure, resting_orders_value=resting_orders_value
+        )
 
     # Deduplicate by (ticker, side)
     seen = set()
