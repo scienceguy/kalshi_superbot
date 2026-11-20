@@ -85,13 +85,17 @@ class BoxScanner:
         )
 
     def get_kalshi_markets(self) -> List[Dict]:
-        """Get active 15m markets from Kalshi."""
-        try:
-            markets = self.kalshi.get_markets(series="KXBTC15M", status="open", limit=100)
-            return markets.get("markets", []) if markets else []
-        except Exception as e:
-            log.warning(f"Failed to fetch Kalshi markets: {e}")
-            return []
+        """Get active 15m markets from Kalshi for all series."""
+        all_markets = []
+        series_list = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M", "KXBNB15M", "KXHYPE15M", "KXZEC15M", "KXNEAR15M"]
+        for series in series_list:
+            try:
+                markets = self.kalshi.get_markets(series_ticker=series, status="open", limit=100)
+                if markets and "markets" in markets:
+                    all_markets.extend(markets["markets"])
+            except Exception as e:
+                log.warning(f"Failed to fetch Kalshi markets for {series}: {e}")
+        return all_markets
 
     def get_orderbook(self, ticker: str) -> Optional[Dict]:
         """Get orderbook for a ticker."""
