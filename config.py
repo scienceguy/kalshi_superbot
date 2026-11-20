@@ -211,6 +211,11 @@ GATES_FEE_TAKER = _env_bool("GATES_FEE_TAKER", True)
 GATES_TIME_DECAY_ENABLED = _env_bool("GATES_TIME_DECAY_ENABLED", True)
 GATES_HIGH_GAMMA_MINUTES = _env_float("GATES_HIGH_GAMMA_MINUTES", 2.0)
 GATES_DENY_HIGH_GAMMA = _env_bool("GATES_DENY_HIGH_GAMMA", False)
+# Gate 3 V2 — use measured ATR→sigma multiplier (0.738) instead of sqrt(pi/2)=1.2533.
+# Validated by scripts/measure_sigma.py on VPS data (504 markets, 1507 quotes).
+# Default false until validation confirms improved calibration.
+GATES_SIGMA_FROM_ATR_V2 = _env_bool("GATES_SIGMA_FROM_ATR_V2", False)
+GATES_SIGMA_ATR_MULTIPLIER = _env_float("GATES_SIGMA_ATR_MULTIPLIER", 0.738)
 
 # Feed cache + per-candidate JSONL diagnostics
 GATES_SPOT_CACHE_SECONDS = _env_int("GATES_SPOT_CACHE_SECONDS", 30)
