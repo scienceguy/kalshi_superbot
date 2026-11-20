@@ -64,13 +64,22 @@ class KalshiAPIError(Exception):
     pass
 
 
+# Paths Kalshi serves without authentication (documented public market data).
+# GET-only; anything outside these prefixes requires a signed request.
+_PUBLIC_PREFIXES = ("/markets", "/series", "/events", "/exchange/status")
+
+
 class KalshiClient:
     """
     Minimal signed REST client for Kalshi v2 API.
     All methods return parsed JSON dicts or raise on HTTP error.
+
+    ``require_key=False`` builds a read-only client that can hit only the
+    public GET prefixes (no signature, no key needed) - used by the
+    cross-sectional arbitrage scanner so it runs without credentials.
     """
 
-    def __init__(self):
+    def __init__(self, require_key: bool = True):
         self.base_url   = config.KALSHI_BASE_URL
         # Validate that the base URL contains the expected API root so
         # signature paths are correct. Warn instead of fail to allow
@@ -90,14 +99,17 @@ class KalshiClient:
                 )
         self._api_path  = urlparse(self.base_url).path
         self.key_id     = config.KALSHI_KEY_ID
-        self._privkey   = self._load_private_key()
+        if require_key:
+            self._privkey = self._load_private_key()
+        else:
+            self._privkey = None   # read-only public mode: no signing headers
         self._last_req  = 0.0
         self._last_balance_req = 0.0  # Separate timer for balance endpoint
         self._lock      = threading.Lock()
         self.session    = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
         self.session.mount('https://', HTTPAdapter(pool_connections=20, pool_maxsize=20))
-        self._verified = False
+        self._verified = bool(not require_key)  # nothing to verify without a key
 
     def _verify_key(self):
         """Confirm the loaded private key corresponds to KALSHI_KEY_ID.
@@ -216,13 +228,28 @@ class KalshiClient:
 
         Rate limit: ~10 req/s. We enforce a min gap between requests and
         back off on 429 with exponential retry.
+
+        In read-only mode (no private key) only public GET prefixes are
+        allowed; anything else raises instead of being sent unsigned.
         """
         # Verify key on first use (fails fast with clear error if key is wrong)
         self._ensure_verified()
 
         full_path = path if path.startswith("/") else f"/{path}"
+
+        if self._privkey is None:
+            if method.upper() != "GET" or not any(
+                full_path.startswith(p) for p in _PUBLIC_PREFIXES
+            ):
+                raise KalshiAPIError(
+                    f"{method} {full_path} needs a signed request: build "
+                    "KalshiClient() with KALSHI_KEY_ID + KALSHI_KEY_FILE."
+                )
+            headers = {}
+        else:
+            headers = self._auth_header(method, full_path)
+
         url       = self.base_url + full_path
-        headers   = self._auth_header(method, full_path)
 
         # Default timeout: 10s connect/read; overridable per call
         if timeout is None:
