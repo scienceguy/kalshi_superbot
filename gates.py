@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import binance_feed
+import brti_tracker
 import config
 import fees
 import gbm
@@ -49,6 +50,9 @@ SERIES_ASSET = {
 # candidate inside the 30s cycle.
 _spot_cache: dict[str, tuple[float, float | None]] = {}
 _atr_cache: dict[str, tuple[float, float | None]] = {}
+
+# BRTI tracker singleton
+_brti_tracker = None
 
 # Last logged decision per candidate, so unchanged cycles add no log line.
 _last_decision: dict[tuple[str, str], str] = {}
@@ -99,9 +103,35 @@ def spot_for(asset: str) -> float | None:
     
     When SPOT_COMPOSITE_ENABLED is True, uses event-driven WS feed (Binance + Coinbase)
     with staleness checks. Falls back to REST composite_price.
+    
+    When BRTI_TRACKER_ENABLED is True, also tries to get BRTI 60s running average
+    for more accurate settlement price estimation.
     """
     global _spot_composite
+    global _brti_tracker
     
+    # Try BRTI tracker first if enabled (most accurate for settlement)
+    if config.BRTI_TRACKER_ENABLED:
+        try:
+            if _brti_tracker is None:
+                # Initialize BRTI tracker with the relevant symbol
+                symbol = f"{asset}USDT"
+                _brti_tracker = brti_tracker.BRTITracker(symbols=[symbol])
+            
+            brti_avg = _brti_tracker.get_running_average(symbol)
+            brti_age = _brti_tracker.get_age_seconds(symbol)
+            
+            # Use BRTI if fresh enough (within 2 seconds as per config)
+            if brti_avg is not None and brti_age is not None and brti_age <= config.BRTI_MAX_AGE_SECONDS:
+                return brti_avg
+                
+            if brti_avg is not None:
+                log.debug("BRTI price for %s stale: age=%.2fs > %.2fs", 
+                          symbol, brti_age, config.BRTI_MAX_AGE_SECONDS)
+        except Exception as e:
+            log.warning("BRTI tracker error for %s: %s", asset, e)
+    
+    # Try SpotComposite (WS feed) if enabled
     if config.SPOT_COMPOSITE_ENABLED:
         # Try to get price from SpotComposite (WS feed)
         try:
