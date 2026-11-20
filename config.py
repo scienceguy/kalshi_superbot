@@ -246,6 +246,18 @@ BOOK_AGE_GATE_ENABLED = _env_bool("BOOK_AGE_GATE_ENABLED", True)
 # protection: a 5-minute sync window can lose up to 5 minutes of P&L/state on
 # a crash. 30s keeps the local→online gap small without hammering Supabase.
 LOCAL_DB_SYNC_INTERVAL = _env_float("LOCAL_DB_SYNC_INTERVAL", 30.0)
+
+# ════════════════════════════════════════════════════════════════════════════
+# BACKTEST DATA CAPTURE (T15-13)
+# ════════════════════════════════════════════════════════════════════════════
+# Capture entry-time snapshots during live/dry-run trading for high-fidelity
+# backtesting. Eliminates lookahead bias by recording what the bot saw at entry.
+BACKTEST_CAPTURE_ENABLED = _env_bool("BACKTEST_CAPTURE_ENABLED", True)
+BACKTEST_CAPTURE_DIR = Path(
+    os.environ.get("BACKTEST_CAPTURE_DIR", "./backtest_data")
+)
+# Capture settlement outcomes for pending snapshots
+BACKTEST_CAPTURE_SETTLEMENTS = _env_bool("BACKTEST_CAPTURE_SETTLEMENTS", True)
 GATES_LOG_FILE = Path(
     os.environ.get("GATES_LOG_FILE")
     or Path(__file__).resolve().parent / "gates_log.jsonl"
