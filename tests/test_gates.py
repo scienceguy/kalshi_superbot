@@ -340,5 +340,35 @@ else:
         pass
 
 
+class TestT13_11SettlementBasis:
+    """T13-11: settlement basis recorded at resolution and used by fair value."""
+
+    def test_asset_for_accepts_dict(self):
+        """asset_for now handles raw API dicts, not only objects."""
+        raw = {"series": "KXBTC15M", "ticker": "KXBTC15M-26NOV090415-15"}
+        assert gates.asset_for(raw) == "BTC"
+        raw2 = {"ticker": "KXETH15M-26NOV090415-15"}
+        assert gates.asset_for(raw2) == "ETH"
+
+    def test_record_settlement_basis_noop_on_payout_fallback(self, monkeypatch):
+        """expiration_value 0 or 100 means payout, not reference price: no record."""
+        import sys
+        sys.argv = [sys.argv[0]]
+        from local_db import get_local_db
+        from trader import _record_settlement_basis
+        db = get_local_db()
+        recorded = []
+        def spy(*a, **kw):
+            recorded.append((a, kw))
+            return True
+        monkeypatch.setattr(db, "record_settlement_basis", spy)
+        m_payout0 = {"expiration_value": 0.0, "series": "KXBTC15M"}
+        m_payout100 = {"expiration_value": 100.0, "series": "KXBTC15M"}
+        with patch.object(gates, "spot_for", return_value=67000.0):
+            _record_settlement_basis("t1", m_payout0)
+            _record_settlement_basis("t2", m_payout100)
+        assert recorded == []  # both payout fallbacks skipped
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

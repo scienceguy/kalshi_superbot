@@ -556,6 +556,29 @@ def _save_settlement_queue(queue: list):
         raise
 
 
+def _record_settlement_basis(ticker, market, venue="kalshi"):
+    """T13-11: record the settlement reference price (Kalshi expiration_value,
+    the raw underlying i.e. the BRTI 60s average) vs our composite spot at
+    window end, so gbm_fair_value / box_arbitrage can adjust for a persistent
+    venue basis. Never raises; a missing spot just skips the record."""
+    try:
+        ref = float(market.get("expiration_value"))
+    except (TypeError, ValueError):
+        return
+    if ref in (0.0, 100.0):
+        return  # payout-style fallback, not a reference price
+    asset = gates.asset_for(market)
+    composite = gates.spot_for(asset) if asset else None
+    if not composite:
+        return
+    try:
+        get_local_db().record_settlement_basis(
+            ticker, venue, ref, float(composite),
+            datetime.now(timezone.utc).isoformat())
+    except Exception as e:
+        log.warning("record_settlement_basis(%s) failed: %s", ticker, e)
+
+
 def _resolve_pending_settlement(client, payload):
     """Compute realized PnL for a queued 'pending' settlement from the exchange.
 
@@ -1244,6 +1267,7 @@ def cycle(client: KalshiClient):
             event_ticker = market.get("event_ticker", t)
             settled_yes = _settle_yes_cents(market)
             if settled_yes is not None:
+                _record_settlement_basis(t, market)
                 if side == "yes":
                     exit_price = float(settled_yes) / 100.0
                 else:

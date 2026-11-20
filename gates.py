@@ -55,12 +55,16 @@ _last_decision: dict[tuple[str, str], str] = {}
 # ═════════════════════════════════════════════════════════════════════
 
 def asset_for(market) -> str | None:
-    """Underlying asset for a market, or None if it is not a supported series."""
-    series = getattr(market, "series", "") or ""
+    """Underlying asset for a market (object or raw API dict), or None."""
+    if isinstance(market, dict):
+        series = market.get("series") or ""
+        ticker = market.get("ticker") or ""
+    else:
+        series = getattr(market, "series", "") or ""
+        ticker = getattr(market, "ticker", "") or ""
     if series in SERIES_ASSET:
         return SERIES_ASSET[series]
     # Fallback: KXBTC15M / KXBTC-... -> BTC
-    ticker = getattr(market, "ticker", "") or ""
     for candidate in (series, ticker):
         base = candidate.split("-")[0]
         if base.startswith("KX"):
