@@ -215,6 +215,15 @@ GATES_DENY_HIGH_GAMMA = _env_bool("GATES_DENY_HIGH_GAMMA", False)
 # Feed cache + per-candidate JSONL diagnostics
 GATES_SPOT_CACHE_SECONDS = _env_int("GATES_SPOT_CACHE_SECONDS", 30)
 GATES_ATR_CACHE_SECONDS = _env_int("GATES_ATR_CACHE_SECONDS", 60)
+
+# Event-driven spot feed (T15-10)
+# When enabled, gates use SpotComposite WS feed instead of REST cache.
+# Staleness bound for entry decisions: reject if price older than this.
+SPOT_COMPOSITE_ENABLED = _env_bool("SPOT_COMPOSITE_ENABLED", True)
+WS_SPOT_STALE_SECONDS = _env_float("WS_SPOT_STALE_SECONDS", 1.0)  # Max age for entry
+WS_SPOT_MAX_EXCHANGE_LATENCY = _env_float("WS_SPOT_MAX_EXCHANGE_LATENCY", 0.5)  # Max exchange-to-receive latency
+# Fallback to REST if WS not available
+SPOT_COMPOSITE_FALLBACK_TO_REST = _env_bool("SPOT_COMPOSITE_FALLBACK_TO_REST", True)
 # Local DB → Supabase background sync interval. Trading bots need fast crash
 # protection: a 5-minute sync window can lose up to 5 minutes of P&L/state on
 # a crash. 30s keeps the local→online gap small without hammering Supabase.

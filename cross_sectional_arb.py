@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """
-cross_sectional_arb.py — Cross-sectional arbitrage for Kalshi 15m up/down contracts.
+cross_sectional_arb.py — Cross-venue arbitrage for Kalshi 15m up/down contracts.
 
-Key insight: For a mutually exclusive and exhaustive set of up/down contracts on the same
-15-minute window (BTC, ETH, SOL, XRP up/down), the YES prices should sum to approximately $1.00
-(100 cents) because exactly one outcome resolves YES and the rest resolve NO.
+KEY INSIGHT FROM WEB RESEARCH (2026-11-20):
+- Kalshi and Polymarket US BOTH settle 15m crypto on CF Benchmarks BRTI 60-second average
+- Same tie rule: "at least the price to beat is Up" (ties go YES/Up)
+- SAME underlying, SAME window = SAME bet on different venues
+- Polymarket US vs Kalshi divergence: 0 of 1,838 windows (perfect BRTI agreement)
+- This IS a true arbitrage opportunity (same contract, different prices)
+- Kalshi has deeper books; Polymarket US has 5m windows Kalshi doesn't
 
-However, Kalshi's 15m crypto markets are independent binary contracts on DIFFERENT assets.
-They are NOT mutually exclusive - BTC up and ETH up can both resolve YES simultaneously.
-So the classic "complete set arbitrage" (sum of YES asks < 100c) DOES NOT APPLY.
-
-What DOES apply:
-1. Within a single market: YES + NO = $1.00 always (by construction, bid-ask spread straddles 100c)
-2. Cross-venue: Kalshi 15m BTC up/down vs Polymarket US 15m BTC up/down (same settlement, different fees)
-3. Cross-asset correlation: If BTC is up, ETH is more likely up (correlated moves)
-
-This module implements:
-- Venue cross-arbitrage: Kalshi vs Polymarket US for the SAME asset/window
-- Correlation-aware sizing: When one asset moves, adjust expectations for others
+What this module implements:
+- Cross-venue arbitrage: Kalshi vs Polymarket US for SAME asset/window
+- NOT cross-asset (BTC up + ETH up ≠ complete set; they're independent)
 """
 
 import logging
@@ -29,6 +24,8 @@ from datetime import datetime, timezone
 
 import config
 from kalshi_client import KalshiClient
+
+# Polymarket US client from archive
 sys.path.insert(0, '/home/ubuntu/kalshi_superbot/archive')
 from polymarket_client import PolymarketUSClient
 
@@ -66,23 +63,17 @@ class ArbOpportunity:
 
 
 def kalshi_fee_taker(price_cents: float) -> float:
-    """Kalshi taker fee in cents per contract."""
+    """Kalshi taker fee in cents per contract. Round UP to next cent per order."""
     p = price_cents / 100.0
     fee = math.ceil(0.07 * p * (1 - p) * 100)
     return fee
 
 
-def polymarket_fee_taker(price_cents: float) -> float:
-    """Polymarket US taker fee estimate (placeholder - needs authenticated probe)."""
-    # Standard Polymarket fee ~2 bps on notional
+def polymarket_fee_taker(price_cents: float, tier: float = 0.095) -> float:
+    """Polymarket US taker fee estimate (Theta * p * (1-p), round to cent)."""
     p = price_cents / 100.0
-    fee = max(1, round(0.002 * p * 100))  # ~0.2% of price, min 1 cent
+    fee = max(1, round(tier * p * (1 - p) * 100))
     return fee
-
-
-def polymarket_fee_maker(price_cents: float) -> float:
-    """Polymarket US maker fee estimate (often 0 or rebate)."""
-    return 0  # Most markets have 0 maker fee
 
 
 def get_kalshi_quote(client: KalshiClient, asset: str, window_start: datetime) -> Optional[VenueQuote]:
@@ -97,7 +88,6 @@ def get_kalshi_quote(client: KalshiClient, asset: str, window_start: datetime) -
     if not series:
         return None
     
-    # Find the market for this window
     markets = client.get_markets(series_ticker=series, status="open", limit=100)
     target_ts = int(window_start.timestamp())
     
@@ -145,7 +135,7 @@ def get_polymarket_quote(client: PolymarketUSClient, asset: str, window_start: d
     if yes_bid == 0 and yes_ask == 0:
         return None
     
-    # No side = 1 - yes side
+    # No side = 1 - yes side (complementary)
     no_bid = 100 - yes_ask
     no_ask = 100 - yes_bid
     
@@ -176,9 +166,9 @@ def find_cross_venue_arbs(kalshi_client: KalshiClient, poly_client: PolymarketUS
         poly_q = get_polymarket_quote(poly_client, asset, window_start)
         
         if not kalshi_q or not poly_q:
+            log.debug(f"No quotes for {asset} at {window_start}")
             continue
         
-        # Check both directions: buy YES on one, sell YES on other
         # Direction 1: Buy YES on Kalshi, sell YES on Polymarket
         # = Buy YES on Kalshi @ ask, Buy NO on Polymarket @ ask (since selling YES = buying NO)
         cost_kalshi_yes = kalshi_q.yes_ask + kalshi_fee_taker(kalshi_q.yes_ask)
@@ -193,7 +183,9 @@ def find_cross_venue_arbs(kalshi_client: KalshiClient, poly_client: PolymarketUS
         edge_2 = 100 - total_cost_2
         
         # Check if either direction has positive edge
-        if edge_1 > 0.5:  # Minimum 0.5c edge after fees
+        min_edge_cents = 0.5  # Minimum 0.5c edge after fees
+        
+        if edge_1 > min_edge_cents:
             opportunities.append(ArbOpportunity(
                 asset=asset,
                 window_start=window_start,
@@ -206,7 +198,7 @@ def find_cross_venue_arbs(kalshi_client: KalshiClient, poly_client: PolymarketUS
                 confidence=min(0.9, edge_1 / 2.0),  # Higher edge = higher confidence
             ))
         
-        if edge_2 > 0.5:
+        if edge_2 > min_edge_cents:
             opportunities.append(ArbOpportunity(
                 asset=asset,
                 window_start=window_start,
@@ -232,12 +224,13 @@ def print_opportunities(opps: List[ArbOpportunity]):
     
     print(f"\n{'='*80}")
     print(f"CROSS-VENUE ARBITRAGE OPPORTUNITIES ({len(opps)} found)")
+    print(f"Same settlement: CF Benchmarks BRTI 60s avg | Tie → Up | Kalshi vs Polymarket US")
     print(f"{'='*80}")
     
     for opp in opps:
         k = opp.kalshi_quote
         p = opp.poly_quote
-        print(f"\n{opp.asset} @ {opp.window_start.strftime('%H:%M:%S')}:")
+        print(f"\n{opp.asset} @ {opp.window_start.strftime('%H:%M:%S')} UTC:")
         print(f"  Kalshi:   YES {k.yes_bid:.1f}/{k.yes_ask:.1f} | NO {k.no_bid:.1f}/{k.no_ask:.1f}")
         print(f"  Polymkt:  YES {p.yes_bid:.1f}/{p.yes_ask:.1f} | NO {p.no_bid:.1f}/{p.no_ask:.1f}")
         print(f"  Action:   Buy {opp.kalshi_side.upper()} on Kalshi @ {getattr(k, f'{opp.kalshi_side}_ask'):.1f}c")
@@ -256,6 +249,7 @@ def main():
     window_start = now.replace(minute=minutes, second=0, microsecond=0)
     
     print(f"Checking cross-venue arb for window: {window_start}")
+    print("Settlement: CF Benchmarks BRTI 60s average | Tie → Up (both venues)")
     
     kalshi = KalshiClient()
     poly = PolymarketUSClient()

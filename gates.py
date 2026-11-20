@@ -30,6 +30,9 @@ import binance_feed
 import config
 import fees
 
+# Lazy import for SpotComposite (event-driven WS feed)
+_spot_composite = None
+
 log = logging.getLogger(__name__)
 
 # Series handled by the gates. Every one of these has a Binance spot and
@@ -91,11 +94,54 @@ def _cached(cache: dict, key: str, ttl: float, fn):
 
 
 def spot_for(asset: str) -> float | None:
-    """Median venue spot price, cached for GATES_SPOT_CACHE_SECONDS."""
-    return _cached(
-        _spot_cache, asset, config.GATES_SPOT_CACHE_SECONDS,
-        lambda: binance_feed.composite_price(f"{asset}USDT", timeout=5),
-    )
+    """Median venue spot price, cached for GATES_SPOT_CACHE_SECONDS.
+    
+    When SPOT_COMPOSITE_ENABLED is True, uses event-driven WS feed (Binance + Coinbase)
+    with staleness checks. Falls back to REST composite_price.
+    """
+    global _spot_composite
+    
+    if config.SPOT_COMPOSITE_ENABLED:
+        # Try to get price from SpotComposite (WS feed)
+        try:
+            from spot_composite import get_spot_composite as get_spot_composite_async
+            import asyncio
+            
+            # Get or create the singleton
+            if _spot_composite is None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    _spot_composite = loop.run_until_complete(
+                        get_spot_composite_async([f"{asset}USDT"])
+                    )
+                finally:
+                    loop.close()
+            
+            # Get fresh price with age check
+            if _spot_composite:
+                symbol = f"{asset}USDT"
+                spot_px, age_sec = _spot_composite.get_spot_with_age(symbol)
+                
+                # Reject if stale
+                if spot_px is not None and age_sec <= config.WS_SPOT_STALE_SECONDS:
+                    return spot_px
+                
+                # Log staleness
+                if spot_px is not None:
+                    log.debug("SpotComposite price for %s stale: age=%.2fs > %.2fs", 
+                              symbol, age_sec, config.WS_SPOT_STALE_SECONDS)
+        except Exception as e:
+            log.warning("SpotComposite error for %s: %s, falling back to REST", asset, e)
+    
+    # Fallback to REST cache
+    if config.SPOT_COMPOSITE_FALLBACK_TO_REST:
+        return _cached(
+            _spot_cache, asset, config.GATES_SPOT_CACHE_SECONDS,
+            lambda: binance_feed.composite_price(f"{asset}USDT", timeout=5),
+        )
+    
+    return None
 
 
 def atr_1m(asset: str) -> float | None:
