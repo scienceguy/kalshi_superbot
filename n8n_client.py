@@ -10,6 +10,7 @@ Uses the n8n API key (X-N8N-API-KEY header) to:
 All endpoints live under http://127.0.0.1:5678/api/v1/
 """
 
+import json
 import logging
 import os
 import queue
@@ -34,13 +35,20 @@ DEFAULT_BASE_URL = "http://127.0.0.1:5678"
 DEFAULT_WEBHOOK_TIMEOUT = max(1, config.CYCLE_TIMEOUT_SECONDS - 5)
 
 # Non-blocking webhook queue — fire-and-forget to avoid stalling the cycle
-_webhook_queue: "queue.Queue[tuple]" = queue.Queue()
+# Bounded queue (T13-04): maxsize=1000, spill to durable WAL on queue.Full
+_WEBHOOK_QUEUE_MAXSIZE = 1000
+_webhook_queue: "queue.Queue[tuple]" = queue.Queue(maxsize=_WEBHOOK_QUEUE_MAXSIZE)
 _webhook_worker_started = False
 _webhook_worker_lock = threading.Lock()
+
+# Spill file for dropped webhooks (T13-04: no-drop ledger)
+_SPILL_FILE = Path("/tmp/n8n_webhook_spill.jsonl")
+_spill_lock = threading.Lock()
 
 
 def _webhook_worker():
     """Background worker that processes webhook queue."""
+    last_replay = 0.0
     while True:
         try:
             item = _webhook_queue.get(timeout=1.0)
@@ -52,6 +60,11 @@ def _webhook_worker():
             except Exception as e:
                 log.warning("Background webhook %s failed: %s", webhook_path, e)
         except queue.Empty:
+            # Periodically replay spilled webhooks (every 30s)
+            now = time.time()
+            if now - last_replay > 30.0:
+                replay_spilled_webhooks()
+                last_replay = now
             continue
         except Exception as e:
             log.error("Webhook worker error: %s", e)
@@ -293,10 +306,16 @@ class N8nClient:
         execution and returns immediately with an empty dict — the cycle does
         not block waiting for n8n. Set fire_and_forget=False for synchronous
         execution (e.g., health checks where we need the response).
+
+        On queue.Full (T13-04), spills to durable JSONL file for later replay.
         """
         if fire_and_forget:
             _start_webhook_worker()
-            _webhook_queue.put((self, webhook_path, data, method, timeout, max_retries))
+            try:
+                _webhook_queue.put_nowait((self, webhook_path, data, method, timeout, max_retries))
+            except queue.Full:
+                # Spill to durable WAL — never drop a webhook (T13-04)
+                _spill_webhook(webhook_path, data, method, timeout, max_retries)
             return {}
         else:
             return self._execute_webhook_sync(webhook_path, data, method, timeout, max_retries)
@@ -333,6 +352,70 @@ class N8nClient:
         if not wf.get("active"):
             return self.activate_workflow(workflow_id)
         return wf
+
+
+def _spill_webhook(webhook_path: str, data: Dict[str, Any], method: str,
+                   timeout: int, max_retries: int) -> None:
+    """Append webhook to spill file (durable WAL) when queue is full."""
+    entry = {
+        "ts": time.time(),
+        "webhook_path": webhook_path,
+        "data": data,
+        "method": method,
+        "timeout": timeout,
+        "max_retries": max_retries,
+    }
+    with _spill_lock:
+        try:
+            with open(_SPILL_FILE, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+            log.warning("Webhook spilled to %s (queue full): %s", _SPILL_FILE, webhook_path)
+        except Exception as e:
+            log.error("Failed to spill webhook to %s: %s", _SPILL_FILE, e)
+
+
+def replay_spilled_webhooks() -> int:
+    """Replay webhooks from spill file. Returns count replayed."""
+    if not _SPILL_FILE.exists():
+        return 0
+    replayed = 0
+    remaining = []
+    with _spill_lock:
+        try:
+            with open(_SPILL_FILE, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        # Try to re-queue
+                        try:
+                            _webhook_queue.put_nowait((
+                                get_client(),  # Will lazy-init global client
+                                entry["webhook_path"],
+                                entry["data"],
+                                entry["method"],
+                                entry["timeout"],
+                                entry["max_retries"],
+                            ))
+                            replayed += 1
+                        except queue.Full:
+                            # Still full, keep for next replay
+                            remaining.append(line)
+                    except json.JSONDecodeError:
+                        log.warning("Corrupt spill entry, skipping: %s", line[:100])
+        except Exception as e:
+            log.error("Error reading spill file: %s", e)
+        # Write back un-replayed entries
+        if remaining:
+            with open(_SPILL_FILE, "w") as f:
+                f.write("\n".join(remaining) + "\n")
+        else:
+            _SPILL_FILE.unlink(missing_ok=True)
+    if replayed:
+        log.info("Replayed %d spilled webhooks", replayed)
+    return replayed
 
 
 # Global client instance (lazy)
