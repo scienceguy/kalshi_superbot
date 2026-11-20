@@ -179,7 +179,12 @@ class RiskManager:
         # Per-trade cap (based on cash, not exposure)
         per_trade_cap = cash * per_trade_pct
 
-        return min(exposure_room, cash_room, per_trade_cap, config.MAX_TRADE_DOLLARS)
+        # Equity-scaled max trade (T13-03): fraction of start-of-day equity
+        equity_scaled_max = self.state.start_balance * config.MAX_TRADE_PCT_OF_EQUITY if self.state.start_balance > 0 else config.MAX_TRADE_DOLLARS
+        # Use the more conservative of equity-scaled and legacy dollar cap
+        max_trade_cap = min(equity_scaled_max, config.MAX_TRADE_DOLLARS)
+
+        return min(exposure_room, cash_room, per_trade_cap, max_trade_cap)
 
     def check(self, cash: float, exposure: float,
               trade_cost: float, ticker: str,
@@ -212,7 +217,13 @@ class RiskManager:
                 f"portfolio=${portfolio:.2f})"
             )
 
-        min_cash = config.PAPER_MIN_CASH_ABSOLUTE if paper else config.MIN_CASH_ABSOLUTE
+        # Equity-scaled minimum cash floor (T13-03)
+        if paper:
+            equity_scaled_min = self.state.start_balance * config.PAPER_MIN_CASH_PCT_OF_EQUITY if self.state.start_balance > 0 else config.PAPER_MIN_CASH_ABSOLUTE
+            min_cash = max(config.PAPER_MIN_CASH_ABSOLUTE, equity_scaled_min)
+        else:
+            equity_scaled_min = self.state.start_balance * config.MIN_CASH_PCT_OF_EQUITY if self.state.start_balance > 0 else config.MIN_CASH_ABSOLUTE
+            min_cash = max(config.MIN_CASH_ABSOLUTE, equity_scaled_min)
         if cash - trade_cost < min_cash:
             return False, f"cash floor: ${cash:.2f} - ${trade_cost:.2f} < ${min_cash:.2f}"
 

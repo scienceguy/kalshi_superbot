@@ -319,9 +319,12 @@ EXIT_MIN_MINUTES_LEFT = _env_float("EXIT_MIN_MINUTES_LEFT", 1.0)  # don't dump i
 # Best: MOM_88-93_dynTrue_netTrue_kelly2 → Kelly=0.10, Sharpe 6.60
 # Survival-first: max 3 contracts, 1 per $10 cash (avoids wiping account)
 # ═════════════════════════════════════════════════════════════════════
-MAX_TRADE_DOLLARS = _env_float("MAX_TRADE_DOLLARS", 5.00)
+# Equity-scaled limits (T13-03): fractions of start-of-day equity
+MAX_TRADE_PCT_OF_EQUITY = _env_float("MAX_TRADE_PCT_OF_EQUITY", 0.05)  # 5% of start equity
 MAX_CONTRACTS_CAP = _env_int("MAX_CONTRACTS_CAP", 3)
 CONTRACTS_PER_BALANCE_UNIT = _env_float("CONTRACTS_PER_BALANCE_UNIT", 10.0)
+# Backward-compat: MAX_TRADE_DOLLARS still read but deprecated; use MAX_TRADE_PCT_OF_EQUITY
+MAX_TRADE_DOLLARS = _env_float("MAX_TRADE_DOLLARS", 5.00)
 # 2, not 3+: BTC/ETH/SOL/XRP/DOGE move together, so concurrent 15M positions are
 # one correlated crypto bet, not diversification.
 MAX_OPEN_POSITIONS = _env_int("MAX_OPEN_POSITIONS", 2)
@@ -339,6 +342,8 @@ TOTAL_CASH_TRADABLE_PCT = _env_float("TOTAL_CASH_TRADABLE_PCT", 0.70)
 CASH_FLOOR_PCT = _env_float("CASH_FLOOR_PCT", 0.70)
 EXPOSURE_CEILING_PCT = _env_float("EXPOSURE_CEILING_PCT", 0.30)
 PER_TRADE_PCT = _env_float("PER_TRADE_PCT", 0.05)  # quarter-Kelly-ish, up to 5%
+# Equity-scaled absolute floors (T13-03): fractions of start-of-day equity
+MIN_CASH_PCT_OF_EQUITY = _env_float("MIN_CASH_PCT_OF_EQUITY", 0.005)  # 0.5% of start equity
 MIN_CASH_ABSOLUTE = _env_float("MIN_CASH_ABSOLUTE", 1.00)
 
 # Paper-mode sizing (dry runs only). Dry runs deploy the whole paper balance so
@@ -357,6 +362,8 @@ MIN_CASH_ABSOLUTE = _env_float("MIN_CASH_ABSOLUTE", 1.00)
 PAPER_CASH_FLOOR_PCT = _env_float("PAPER_CASH_FLOOR_PCT", 0.70)
 PAPER_EXPOSURE_CEILING_PCT = _env_float("PAPER_EXPOSURE_CEILING_PCT", 0.30)
 PAPER_PER_TRADE_PCT = _env_float("PAPER_PER_TRADE_PCT", 0.12)
+# Equity-scaled absolute floor for paper mode (T13-03)
+PAPER_MIN_CASH_PCT_OF_EQUITY = _env_float("PAPER_MIN_CASH_PCT_OF_EQUITY", 0.001)  # 0.1% of start equity
 PAPER_MIN_CASH_ABSOLUTE = _env_float("PAPER_MIN_CASH_ABSOLUTE", 0.02)
 DRAWDOWN_HALT_PCT = _env_float("DRAWDOWN_HALT_PCT", 0.08)
 MAX_DRAWDOWN_PCT = _env_float("MAX_DRAWDOWN_PCT", 0.12)
