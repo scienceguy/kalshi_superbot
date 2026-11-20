@@ -33,12 +33,10 @@
       "position": [300, 0],
       "parameters": {
         "method": "PATCH",
-        "url": "={{ 'https://pmhnceoswasoawgrrnwq.supabase.co/rest/v1/orders?order_id=eq.' + $json.body.order_id }}",
+        "url": "={{ $credentials.url + '/rest/v1/orders?order_id=eq.' + $json.body.order_id }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {"name": "apikey", "value": "sb_secret_DrcvlpqWaKuqJdhUCGhemA_SnnxDk-O"},
-            {"name": "Authorization", "value": "Bearer sb_secret_DrcvlpqWaKuqJdhUCGhemA_SnnxDk-O"},
             {"name": "Content-Type", "value": "application/json"},
             {"name": "Prefer", "value": "return=representation"}
           ]
@@ -47,6 +45,12 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ status: $json.body.status, pnl_dollars: $json.body.pnl_dollars }) }}",
         "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "supabase-credentials",
+          "name": "Supabase API"
+        }
       },
       "isActive": true
     },

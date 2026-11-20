@@ -41,7 +41,6 @@ N8N_CONFIG = Path(os.environ.get("N8N_CONFIG_PATH", "/data/data/com.termux/files
 # How each secret is presented as an n8n httpHeaderAuth credential.
 # Match is by lowercase substring of the Bitwarden item name; first hit wins.
 HEADER_MAP = [
-    ("supabase", ("apikey", "")),
     ("n8n api", ("X-N8N-API-KEY", "")),
     ("binance", ("X-MBX-APIKEY", "")),
     ("coingecko", ("x-cg-demo-api-key", "")),
@@ -56,6 +55,10 @@ def header_for(name: str):
         # the private key and the key id use different header names
         is_key = "rsa" in low or "private key" in low
         return ("KALSHI_PRIVATE_KEY", "") if is_key else ("KALSHI-ACCESS-KEY", "")
+    if "supabase" in low:
+        # Supabase credentials contain URL + multiple keys in the value
+        # We'll handle this specially in load_mirror()
+        return ("supabase_special", "")  # marker for special handling
     for key, val in HEADER_MAP:
         if key in low:
             return val
@@ -74,6 +77,21 @@ def encrypt_value(plaintext: str, key: bytes) -> str:
     return base64.b64encode(nonce + AESGCM(key).encrypt(nonce, plaintext.encode(), None)).decode()
 
 
+def parse_supabase_value(value: str) -> dict:
+    """Parse Supabase credential value which contains multiple lines."""
+    result = {"url": "", "apikey": "", "service_key": ""}
+    for line in value.splitlines():
+        line = line.strip()
+        if line.startswith("SUPABASE_URL="):
+            result["url"] = line.split("=", 1)[1].strip()
+        elif line.startswith("SUPABASE_PUBLISHABLE_KEY=") or line.startswith("SUPABASE_SECRET_KEY="):
+            # Use the first key found as the API key
+            if not result["apikey"]:
+                result["apikey"] = line.split("=", 1)[1].strip()
+            result["service_key"] = line.split("=", 1)[1].strip()
+    return result
+
+
 def load_mirror() -> list:
     index = json.loads((STORE / "index.json").read_text())
     out = []
@@ -83,6 +101,24 @@ def load_mirror() -> list:
         if not value:
             continue
         hname, prefix = header_for(rec["name"])
+        
+        # Special handling for Supabase credentials
+        if hname == "supabase_special":
+            parsed = parse_supabase_value(value)
+            if parsed["url"] and parsed["apikey"]:
+                # Create a credential that n8n can use for HTTP requests with base URL + auth
+                # n8n's httpHeaderAuth can include the base URL in the credential
+                out.append({
+                    "name": rec.get("n8n_name") or rec["name"],
+                    "type": "httpHeaderAuth",
+                    "data": {
+                        "name": "Authorization",
+                        "value": "Bearer " + parsed["apikey"],
+                        "url": parsed["url"]  # Custom field for base URL
+                    },
+                })
+            continue
+        
         out.append({
             "name": rec.get("n8n_name") or rec["name"],
             "type": "httpHeaderAuth",
