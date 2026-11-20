@@ -1,0 +1,68 @@
+{
+  "name": "Retrain ML Models",
+  "nodes": [
+    {
+      "id": "node_cron",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {"hour": 0, "minute": 30},
+            {"hour": 6, "minute": 30},
+            {"hour": 12, "minute": 30},
+            {"hour": 18, "minute": 30}
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_collect",
+      "name": "Collect Fresh Data",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [300, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 /opt/superbot/data_collector.py --series KXBTC15M KXETH15M KXSOL15M KXXRP15M KXDOGE15M --limit 500",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_train",
+      "name": "Train XGBoost/LightGBM",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 /opt/superbot/train_xgboost.py --walk-forward --calibrate --model-card",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_promote",
+      "name": "Promote Model",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [900, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 /opt/superbot/forecaster.py --promote-check --model-card /opt/superbot/models/model_card_latest.json",
+        "executeOnce": true
+      }
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [[{"node": "Collect Fresh Data", "type": "main", "index": 0}]]
+    },
+    "Collect Fresh Data": {
+      "main": [[{"node": "Train XGBoost/LightGBM", "type": "main", "index": 0}]]
+    },
+    "Train XGBoost/LightGBM": {
+      "main": [[{"node": "Promote Model", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {},
+  "active": true
+}

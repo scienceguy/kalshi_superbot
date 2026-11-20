@@ -1,0 +1,64 @@
+{
+  "name": "Breaker Alert",
+  "nodes": [
+    {
+      "id": "node_webhook",
+      "name": "Breaker Alert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "superbot-breaker-alert",
+        "responseMode": "responseNode",
+        "authentication": "headerAuth",
+        "webhookId": "superbot-breaker-alert-auto",
+        "responseData": true,
+        "options": {}
+      },
+      "webhookId": "superbot-breaker-alert-auto",
+      "isActive": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "f6c95c38-1a39-49ec-9a5e-a4b0872af8bb",
+          "name": "SuperBot Webhook Auth"
+        }
+      }
+    },
+    {
+      "id": "node_process",
+      "name": "Process Alert",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [300, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; data=json.load(sys.stdin); breaker=data.get('breaker'); reason=data.get('reason'); venue=data.get('venue'); print(f'BREAKER: {breaker} on {venue}: {reason}'); from mempalace import mempalace_logstream_append; mempalace_logstream_append('status', 'project/kalshi_superbot', 'status', 'breaker', None, 'open', json.dumps(data))\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [600, 0],
+      "parameters": {
+        "responseCode": "200",
+        "responseBody": "={{ {ok: true, alerted: true} }}",
+        "respondWith": "json",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Breaker Alert Webhook": {
+      "main": [[{"node": "Process Alert", "type": "main", "index": 0}]]
+    },
+    "Process Alert": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {},
+  "active": true,
+  "webhookId": "superbot-breaker-alert-auto"
+}

@@ -1,0 +1,163 @@
+{
+  "name": "Agent Dispatch",
+  "nodes": [
+    {
+      "id": "node_webhook",
+      "name": "Incident Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "superbot-agent-dispatch",
+        "responseMode": "responseNode",
+        "authentication": "headerAuth",
+        "webhookId": "superbot-agent-dispatch-auto",
+        "responseData": true,
+        "options": {}
+      },
+      "webhookId": "superbot-agent-dispatch-auto",
+      "isActive": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "f6c95c38-1a39-49ec-9a5e-a4b0872af8bb",
+          "name": "SuperBot Webhook Auth"
+        }
+      }
+    },
+    {
+      "id": "node_route",
+      "name": "Route by Topic",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [300, 0],
+      "parameters": {
+        "rules": {
+          "values": [
+            {"value": "={{ $json.body.topic }}", "operation": "equal", "value2": "signal.proposal"},
+            {"value": "={{ $json.body.topic }}", "operation": "equal", "value2": "risk.veto"},
+            {"value": "={{ $json.body.topic }}", "operation": "equal", "value2": "forecast.published"},
+            {"value": "={{ $json.body.topic }}", "operation": "equal", "value2": "param.change.request"},
+            {"value": "={{ $json.body.topic }}", "operation": "equal", "value2": "incident"},
+            {"value": "={{ $json.body.topic }}", "operation": "equal", "value2": "sync.health"}
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_signal_proposal",
+      "name": "Handle Signal Proposal",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, -200],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from mempalace import mempalace_logstream_append; data=json.load(sys.stdin); mempalace_logstream_append('task.request', 'project/kalshi_superbot', 'delegation', data.get('topic'), data.get('correlation_id'), 'open', json.dumps(data)); print('Signal proposal routed')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_risk_veto",
+      "name": "Handle Risk Veto",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, -100],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from mempalace import mempalace_logstream_append; data=json.load(sys.stdin); mempalace_logstream_append('task.request', 'project/kalshi_superbot', 'delegation', data.get('topic'), data.get('correlation_id'), 'open', json.dumps(data)); print('Risk veto routed')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_forecast_published",
+      "name": "Handle Forecast Published",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from mempalace import mempalace_kg_add; data=json.load(sys.stdin); mempalace_kg_add('forecast_published', json.dumps(data)); print('Forecast published logged')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_param_change",
+      "name": "Handle Param Change",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 100],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from mempalace import mempalace_logstream_append; data=json.load(sys.stdin); mempalace_logstream_append('task.request', 'project/kalshi_superbot', 'delegation', data.get('topic'), data.get('correlation_id'), 'open', json.dumps(data)); print('Param change routed')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_incident",
+      "name": "Handle Incident",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 200],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from mempalace import mempalace_logstream_append, mempalace_kg_add; data=json.load(sys.stdin); mempalace_logstream_append('status', 'project/kalshi_superbot', 'status', 'incident', None, 'open', json.dumps(data)); mempalace_kg_add('incident', json.dumps(data)); print('Incident logged')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_sync_health",
+      "name": "Handle Sync Health",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 300],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from mempalace import mempalace_kg_add; data=json.load(sys.stdin); mempalace_kg_add('sync_health', json.dumps(data)); print('Sync health logged')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 0],
+      "parameters": {
+        "responseCode": "200",
+        "responseBody": "={{ {ok: true, routed: true} }}",
+        "respondWith": "json",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Incident Webhook": {
+      "main": [[{"node": "Route by Topic", "type": "main", "index": 0}]]
+    },
+    "Route by Topic": {
+      "main": [
+        [{"node": "Handle Signal Proposal", "type": "main", "index": 0}],
+        [{"node": "Handle Risk Veto", "type": "main", "index": 1}],
+        [{"node": "Handle Forecast Published", "type": "main", "index": 2}],
+        [{"node": "Handle Param Change", "type": "main", "index": 3}],
+        [{"node": "Handle Incident", "type": "main", "index": 4}],
+        [{"node": "Handle Sync Health", "type": "main", "index": 5}]
+      ]
+    },
+    "Handle Signal Proposal": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    },
+    "Handle Risk Veto": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    },
+    "Handle Forecast Published": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    },
+    "Handle Param Change": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    },
+    "Handle Incident": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    },
+    "Handle Sync Health": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {},
+  "active": true,
+  "webhookId": "superbot-agent-dispatch-auto"
+}

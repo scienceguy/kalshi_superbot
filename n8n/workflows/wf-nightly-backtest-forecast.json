@@ -1,0 +1,79 @@
+{
+  "name": "Nightly Backtest Forecast",
+  "nodes": [
+    {
+      "id": "node_cron",
+      "name": "Nightly Cron",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 2,
+              "minute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_backtest",
+      "name": "Run Backtest",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [300, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 /opt/superbot/backtest.py --quick --limit 200 --top 20 --jobs 4",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_forecast",
+      "name": "Generate Forecast",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 /opt/superbot/forecaster.py --horizon 14 --output /tmp/forecast.json",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_mempalace",
+      "name": "Post to MemPalace",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [900, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from mempalace import mempalace_kg_add; data=json.load(open('/tmp/forecast.json')); mempalace_kg_add('forecast_14d', json.dumps(data)); print('Forecast posted to MemPalace')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_notify",
+      "name": "Notify Operator",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1200, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"from mempalace import mempalace_kg_add; mempalace_kg_add('nightly_report', 'Backtest and forecast completed at $(date)')\"",
+        "executeOnce": true
+      }
+    }
+  ],
+  "connections": {
+    "Nightly Cron": {
+      "main": [[{"node": "Run Backtest", "type": "main", "index": 0}]]
+    },
+    "Run Backtest": {
+      "main": [[{"node": "Generate Forecast", "type": "main", "index": 0}]]
+    },
+    "Generate Forecast": {
+      "main": [[{"node": "Post to MemPalace", "type": "main", "index": 0}, {"node": "Notify Operator", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {},
+  "active": true
+}

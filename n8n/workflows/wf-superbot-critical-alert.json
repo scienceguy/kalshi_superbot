@@ -1,0 +1,44 @@
+{
+  "name": "SuperBot Critical Alert",
+  "nodes": [
+    {
+      "id": "node_webhook",
+      "name": "Critical Alert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "superbot-critical-alert",
+        "responseMode": "responseNode",
+        "authentication": "none",
+        "webhookId": "superbot-critical-alert",
+        "responseData": true,
+        "options": {}
+      },
+      "webhookId": "superbot-critical-alert",
+      "isActive": true
+    },
+    {
+      "id": "node_respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [300, 0],
+      "parameters": {
+        "responseCode": "200",
+        "responseBody": "={{ {ok: true, received: $json.body} }}",
+        "respondWith": "json",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Critical Alert Webhook": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {},
+  "active": true,
+  "webhookId": "superbot-critical-alert"
+}

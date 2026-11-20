@@ -1,0 +1,111 @@
+{
+  "name": "Reconcile Venue State",
+  "nodes": [
+    {
+      "id": "node_cron",
+      "name": "Every 2 Minutes",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {"minute": 0},
+            {"minute": 2},
+            {"minute": 4},
+            {"minute": 6},
+            {"minute": 8},
+            {"minute": 10},
+            {"minute": 12},
+            {"minute": 14},
+            {"minute": 16},
+            {"minute": 18},
+            {"minute": 20},
+            {"minute": 22},
+            {"minute": 24},
+            {"minute": 26},
+            {"minute": 28},
+            {"minute": 30},
+            {"minute": 32},
+            {"minute": 34},
+            {"minute": 36},
+            {"minute": 38},
+            {"minute": 40},
+            {"minute": 42},
+            {"minute": 44},
+            {"minute": 46},
+            {"minute": 48},
+            {"minute": 50},
+            {"minute": 52},
+            {"minute": 54},
+            {"minute": 56},
+            {"minute": 58}
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_kalshi_balance",
+      "name": "Fetch Kalshi Balance",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [300, -100],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"from kalshi_client import KalshiClient; c=KalshiClient(); b=c.get_balance(); print(f'kalshi_balance={b}')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_poly_balance",
+      "name": "Fetch Polymarket Balance",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [300, 100],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"from polymarket_client import PolymarketUSClient; c=PolymarketUSClient(); b=c.get_balance(); print(f'poly_balance={b}')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_compare",
+      "name": "Compare with Local DB",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from local_db import get_local_db; db=get_local_db(); kb=db.get_bot_state('kalshi_balance') or 0; pb=db.get_bot_state('polymarket_balance') or 0; print(f'local_kalshi={kb} local_poly={pb}')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_alert",
+      "name": "Alert on Mismatch",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [900, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import sys; from mempalace import mempalace_kg_add; diff=sys.argv[1] if len(sys.argv)>1 else '0'; mempalace_kg_add('reconcile_mismatch', json.dumps({'diff_usd': float(diff), 'ts': __import__('time').time()})); print('Mismatch alert sent')\"",
+        "executeOnce": true
+      }
+    }
+  ],
+  "connections": {
+    "Every 2 Minutes": {
+      "main": [
+        [{"node": "Fetch Kalshi Balance", "type": "main", "index": 0}],
+        [{"node": "Fetch Polymarket Balance", "type": "main", "index": 0}]
+      ]
+    },
+    "Fetch Kalshi Balance": {
+      "main": [[{"node": "Compare with Local DB", "type": "main", "index": 0}]]
+    },
+    "Fetch Polymarket Balance": {
+      "main": [[{"node": "Compare with Local DB", "type": "main", "index": 0}]]
+    },
+    "Compare with Local DB": {
+      "main": [[{"node": "Alert on Mismatch", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {},
+  "active": true
+}

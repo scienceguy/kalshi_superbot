@@ -1,0 +1,51 @@
+{
+  "name": "Daily Report",
+  "nodes": [
+    {
+      "id": "node_cron",
+      "name": "Daily at 6 AM",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {"hour": 6, "minute": 0}
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_gather",
+      "name": "Gather Metrics",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [300, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json; from local_db import get_local_db; db=get_local_db(); kb=db.get_bot_state('kalshi_balance') or 0; pb=db.get_bot_state('polymarket_balance') or 0; kpnl=db.get_bot_state('kalshi_pnl') or 0; ppnl=db.get_bot_state('polymarket_pnl') or 0; total=kb+pb; print(json.dumps({'kalshi_balance': kb, 'polymarket_balance': pb, 'total_balance': total, 'kalshi_pnl': kpnl, 'polymarket_pnl': ppnl, 'total_pnl': kpnl+ppnl}))\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_report",
+      "name": "Generate Report",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; data=json.load(sys.stdin); report=f'Daily Report: Kalshi=${data[\\\"kalshi_balance\\\"]:.2f} Poly=${data[\\\"polymarket_balance\\\"]:.2f} Total=${data[\\\"total_balance\\\"]:.2f} PnL=${data[\\\"total_pnl\\\"]:.2f}'; print(report); from mempalace import mempalace_kg_add; mempalace_kg_add('daily_report', json.dumps(data))\"",
+        "executeOnce": true
+      }
+    }
+  ],
+  "connections": {
+    "Daily at 6 AM": {
+      "main": [[{"node": "Gather Metrics", "type": "main", "index": 0}]]
+    },
+    "Gather Metrics": {
+      "main": [[{"node": "Generate Report", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {},
+  "active": true
+}

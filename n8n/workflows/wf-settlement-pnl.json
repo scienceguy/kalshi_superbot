@@ -1,0 +1,92 @@
+{
+  "name": "Settlement P&L",
+  "nodes": [
+    {
+      "id": "node_webhook",
+      "name": "Settlement Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "superbot-settlement",
+        "responseMode": "responseNode",
+        "authentication": "headerAuth",
+        "webhookId": "superbot-settlement-auto",
+        "responseData": true,
+        "options": {}
+      },
+      "webhookId": "superbot-settlement-auto",
+      "isActive": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "f6c95c38-1a39-49ec-9a5e-a4b0872af8bb",
+          "name": "SuperBot Webhook Auth"
+        }
+      }
+    },
+    {
+      "id": "node_verify",
+      "name": "Verify Settlement",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [300, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys, os; data=json.load(sys.stdin); order_id=data.get('order_id'); ticker=data.get('ticker'); settled_yes=data.get('settled_yes', False); price=data.get('price', 0); size=data.get('size', 0); pnl=(price if settled_yes else 1-price)*size/100; print(f'order_id={order_id} ticker={ticker} settled_yes={settled_yes} pnl=${pnl:.2f}')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_ledger",
+      "name": "Update Ledger",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from local_db import get_local_db; db=get_local_db(); data=json.load(sys.stdin); db.update_order_settlement(data['order_id'], data['settled_yes'], data['price'], data['size']); print('Ledger updated')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_mempalace",
+      "name": "Log to MemPalace",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [900, 0],
+      "parameters": {
+        "command": "env PYTHONPATH=/opt/superbot /usr/bin/python3 -c \"import json, sys; from mempalace import mempalace_kg_add; data=json.load(sys.stdin); mempalace_kg_add('settlement_pnl', json.dumps(data)); print('Logged to MemPalace')\"",
+        "executeOnce": true
+      }
+    },
+    {
+      "id": "node_respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1200, 0],
+      "parameters": {
+        "responseCode": "200",
+        "responseBody": "={{ {ok: true, processed: true} }}",
+        "respondWith": "json",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Settlement Webhook": {
+      "main": [[{"node": "Verify Settlement", "type": "main", "index": 0}]]
+    },
+    "Verify Settlement": {
+      "main": [[{"node": "Update Ledger", "type": "main", "index": 0}, {"node": "Log to MemPalace", "type": "main", "index": 0}]]
+    },
+    "Update Ledger": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    },
+    "Log to MemPalace": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {},
+  "active": true,
+  "webhookId": "superbot-settlement-auto"
+}
