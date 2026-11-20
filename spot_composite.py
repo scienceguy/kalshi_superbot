@@ -27,6 +27,8 @@ from typing import AsyncIterator, Dict, List, Optional
 
 import websockets
 
+from tick_store import get_tick_store, tick_from_spot_composite_tick
+
 log = logging.getLogger("spot_composite")
 
 # Binance market-data endpoints (not blocked from this host)
@@ -247,7 +249,7 @@ class SpotComposite:
                 px = (bid + ask) / 2.0
                 # Binance bookTicker doesn't have exch_ts; use recv_ts as fallback
                 exch_ts = recv_ts
-                self.venues["binance"].ticks[symbol] = Tick(
+                t = Tick(
                     venue="binance",
                     symbol=symbol,
                     px=px,
@@ -256,7 +258,9 @@ class SpotComposite:
                     exch_ts=exch_ts,
                     recv_ts=recv_ts,
                 )
+                self.venues["binance"].ticks[symbol] = t
                 self.venues["binance"].last_recv = recv_ts
+                get_tick_store().append([tick_from_spot_composite_tick(t)])
             except (ValueError, TypeError):
                 pass
 
@@ -269,7 +273,7 @@ class SpotComposite:
                 last_tick = self.venues["binance"].ticks.get(symbol)
                 bid = last_tick.bid if last_tick else None
                 ask = last_tick.ask if last_tick else None
-                self.venues["binance"].ticks[symbol] = Tick(
+                t = Tick(
                     venue="binance",
                     symbol=symbol,
                     px=px,
@@ -278,7 +282,9 @@ class SpotComposite:
                     exch_ts=exch_ts,
                     recv_ts=recv_ts,
                 )
+                self.venues["binance"].ticks[symbol] = t
                 self.venues["binance"].last_recv = recv_ts
+                get_tick_store().append([tick_from_spot_composite_tick(t)])
             except (ValueError, TypeError):
                 pass
 
@@ -350,7 +356,7 @@ class SpotComposite:
                 # Coinbase provides ISO timestamp
                 time_str = msg.get("time")
                 exch_ts = self._parse_iso_timestamp(time_str) if time_str else recv_ts
-                self.venues["coinbase"].ticks[symbol] = Tick(
+                t = Tick(
                     venue="coinbase",
                     symbol=symbol,
                     px=px,
@@ -359,7 +365,9 @@ class SpotComposite:
                     exch_ts=exch_ts,
                     recv_ts=recv_ts,
                 )
+                self.venues["coinbase"].ticks[symbol] = t
                 self.venues["coinbase"].last_recv = recv_ts
+                get_tick_store().append([tick_from_spot_composite_tick(t)])
             except (ValueError, TypeError):
                 pass
 
@@ -380,7 +388,7 @@ class SpotComposite:
                     exch_ts = self._parse_iso_timestamp(time_str) if time_str else recv_ts
                     # Merge with existing ticker bid/ask if any
                     last_tick = self.venues["coinbase"].ticks.get(symbol)
-                    self.venues["coinbase"].ticks[symbol] = Tick(
+                    t = Tick(
                         venue="coinbase",
                         symbol=symbol,
                         px=px,
@@ -389,7 +397,9 @@ class SpotComposite:
                         exch_ts=exch_ts,
                         recv_ts=recv_ts,
                     )
+                    self.venues["coinbase"].ticks[symbol] = t
                     self.venues["coinbase"].last_recv = recv_ts
+                    get_tick_store().append([tick_from_spot_composite_tick(t)])
             except (ValueError, TypeError):
                 pass
 
@@ -402,7 +412,7 @@ class SpotComposite:
                 last_tick = self.venues["coinbase"].ticks.get(symbol)
                 bid = last_tick.bid if last_tick else None
                 ask = last_tick.ask if last_tick else None
-                self.venues["coinbase"].ticks[symbol] = Tick(
+                t = Tick(
                     venue="coinbase",
                     symbol=symbol,
                     px=px,
@@ -411,7 +421,9 @@ class SpotComposite:
                     exch_ts=exch_ts,
                     recv_ts=recv_ts,
                 )
+                self.venues["coinbase"].ticks[symbol] = t
                 self.venues["coinbase"].last_recv = recv_ts
+                get_tick_store().append([tick_from_spot_composite_tick(t)])
             except (ValueError, TypeError):
                 pass
 
