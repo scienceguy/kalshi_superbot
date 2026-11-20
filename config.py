@@ -446,6 +446,39 @@ DRY_STRENGTH_SCALE_CENTS = _env_int("DRY_STRENGTH_SCALE_CENTS", 10)
 DRY_EXIT_DELAY_CYCLES = _env_int("DRY_EXIT_DELAY_CYCLES", 0)
 
 # ═════════════════════════════════════════════════════════════════════
+# STAGED RAMP RULES (T15-43)
+# Paper -> live-dry (--live --dry) -> live at minimum size -> stepwise ramp
+# Rules live in config, not in agent discretion.
+# Each stage requires N settled markets with realized edge matching backtest.
+# ═════════════════════════════════════════════════════════════════════
+RAMP_STAGE = _env_int("RAMP_STAGE", 0)  # 0=paper, 1=live-dry, 2=min, 3=step1, 4=step2, 5=full
+RAMP_STAGE_NAMES = {
+    0: "paper",
+    1: "live-dry",
+    2: "min-size",
+    3: "step-1",
+    4: "step-2",
+    5: "full",
+}
+
+# Stage definitions: (max_position_pct, min_settled_markets, edge_tolerance_pct)
+RAMP_STAGES = {
+    0: {"max_position_pct": 1.00, "min_settled": 0, "edge_tolerance": 0.0, "name": "paper"},
+    1: {"max_position_pct": 1.00, "min_settled": 0, "edge_tolerance": 0.0, "name": "live-dry"},
+    2: {"max_position_pct": 0.005, "min_settled": 10, "edge_tolerance": 0.50, "name": "min-size"},  # 0.5% max
+    3: {"max_position_pct": 0.01, "min_settled": 25, "edge_tolerance": 0.40, "name": "step-1"},   # 1%
+    4: {"max_position_pct": 0.02, "min_settled": 50, "edge_tolerance": 0.30, "name": "step-2"},   # 2%
+    5: {"max_position_pct": 0.08, "min_settled": 100, "edge_tolerance": 0.20, "name": "full"},     # 8% (PER_TRADE_PCT)
+}
+
+# Human approval required for stage transitions
+RAMP_REQUIRE_APPROVAL = _env_bool("RAMP_REQUIRE_APPROVAL", True)
+RAMP_APPROVAL_KEY = _env_str("RAMP_APPROVAL_KEY", "")  # HMAC key for two-person rule
+
+# Auto-advance when criteria met (with approval)
+RAMP_AUTO_ADVANCE = _env_bool("RAMP_AUTO_ADVANCE", False)
+
+# ═════════════════════════════════════════════════════════════════════
 # RESILIENCE (from kalshi_live_bot)
 # ═════════════════════════════════════════════════════════════════════
 ERROR_BACKOFF_SECONDS = _env_int("ERROR_BACKOFF_SECONDS", 5)
